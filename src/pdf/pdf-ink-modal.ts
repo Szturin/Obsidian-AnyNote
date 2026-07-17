@@ -4,6 +4,7 @@ import { PDFDocument, PDFPage, rgb } from "pdf-lib";
 import type InkPlugin from "../main";
 import {
 	TLDRAW_EASINGS,
+	createTldrawInkPath,
 	drawTldrawInkStrokePoints,
 	getStrokePoints,
 	setStrokePointRadii,
@@ -62,9 +63,19 @@ interface PdfPassivePageLayer {
 	positionChanged: boolean;
 	width: number;
 	height: number;
+	renderSignature: string;
 }
 
 type ToolbarDock = "bottom" | "top" | "left" | "right";
+
+interface PdfStrokeRenderCache {
+	signature: string;
+	kind: "ink" | "centerline";
+	strokePoints: StrokePoint[];
+	path: Path2D | null;
+	width: number;
+	options: StrokeOptions;
+}
 
 export class PdfInkOverlay {
 	private plugin: InkPlugin;
@@ -104,6 +115,9 @@ export class PdfInkOverlay {
 	private stageHostPositionChanged = false;
 	private passivePageLayers = new Map<number, PdfPassivePageLayer>();
 	private renderFrame: number | null = null;
+	private resizeRenderTimer: number | null = null;
+	private activeRenderSignature = "";
+	private strokeRenderCache = new Map<string, PdfStrokeRenderCache>();
 	private toolbar: HTMLElement;
 	private snapOverlay: HTMLElement;
 	private toolbarDock: ToolbarDock = "bottom";
@@ -156,6 +170,7 @@ export class PdfInkOverlay {
 		this.closed = true;
 		if (this.data) void this.writeCache();
 		if (this.renderFrame !== null) window.cancelAnimationFrame(this.renderFrame);
+		if (this.resizeRenderTimer !== null) window.clearTimeout(this.resizeRenderTimer);
 		this.resizeObserver?.disconnect();
 		this.abortController?.abort();
 		this.stage?.remove();
@@ -284,16 +299,16 @@ export class PdfInkOverlay {
 		this.previewCanvas.addEventListener("pointerup", (event) => this.onPointerUp(event), { signal, passive: false });
 		this.previewCanvas.addEventListener("pointercancel", (event) => this.onPointerUp(event), { signal, passive: false });
 		window.addEventListener("resize", () => {
-			this.resizeCanvases();
-			this.scheduleRenderAll();
+			this.scheduleDeferredResizeRender();
 		}, { signal });
 		this.host.addEventListener("scroll", () => {
-			this.resizeCanvases();
+			const previousStageHost = this.stageHost;
+			this.syncStageToInkTarget();
+			if (previousStageHost !== this.stageHost) this.resizeCanvases();
 			this.scheduleRenderAll();
 		}, { signal, capture: true });
 		this.resizeObserver = new ResizeObserver(() => {
-			this.resizeCanvases();
-			this.scheduleRenderAll();
+			this.scheduleDeferredResizeRender();
 		});
 		this.resizeObserver.observe(this.host);
 	}
@@ -484,12 +499,21 @@ export class PdfInkOverlay {
 
 	private renderAll() {
 		const strokesByPage = this.strokesByPage();
-		this.clearCanvas(this.canvas);
-		const context = this.context(this.canvas);
-		for (const stroke of strokesByPage.get(this.currentPageNumber()) || []) {
-			renderStroke(context, this.strokeForCurrentStage(stroke), this.selectedStrokeIds.has(stroke.id) ? 0.45 : 1);
-		}
+		const pageNumber = this.currentPageNumber();
+		this.renderPageCanvas(
+			this.canvas,
+			pageNumber,
+			this.currentStageWidth(),
+			this.currentStageHeight(),
+			strokesByPage.get(pageNumber) || [],
+			(signature) => {
+				if (this.activeRenderSignature === signature) return false;
+				this.activeRenderSignature = signature;
+				return true;
+			}
+		);
 		this.renderPassivePageLayers(strokesByPage);
+		this.pruneStrokeRenderCache();
 	}
 
 	private scheduleRenderAll() {
@@ -498,6 +522,21 @@ export class PdfInkOverlay {
 			this.renderFrame = null;
 			this.renderAll();
 		});
+	}
+
+	private scheduleDeferredResizeRender() {
+		this.syncStageToInkTarget();
+		if (this.pointerId !== null) {
+			this.resizeCanvases();
+			this.scheduleRenderAll();
+			return;
+		}
+		if (this.resizeRenderTimer !== null) window.clearTimeout(this.resizeRenderTimer);
+		this.resizeRenderTimer = window.setTimeout(() => {
+			this.resizeRenderTimer = null;
+			this.resizeCanvases();
+			this.scheduleRenderAll();
+		}, 90);
 	}
 
 	private renderPassivePageLayers(strokesByPage: Map<number, PdfInkStroke[]>) {
@@ -538,7 +577,7 @@ export class PdfInkOverlay {
 		page.addClass("anynote-pdf-page-host");
 		const stage = page.createDiv({ cls: "anynote-pdf-passive-stage" });
 		const canvas = stage.createEl("canvas", { cls: "anynote-pdf-passive-canvas" });
-		const layer: PdfPassivePageLayer = { pageNumber, page, stage, canvas, originalPosition, positionChanged, width: 0, height: 0 };
+		const layer: PdfPassivePageLayer = { pageNumber, page, stage, canvas, originalPosition, positionChanged, width: 0, height: 0, renderSignature: "" };
 		this.passivePageLayers.set(pageNumber, layer);
 		return layer;
 	}
@@ -555,12 +594,50 @@ export class PdfInkOverlay {
 			layer.canvas.height = pixelHeight;
 			layer.width = width;
 			layer.height = height;
+			layer.renderSignature = "";
 		}
-		const context = this.context(layer.canvas);
+		this.renderPageCanvas(layer.canvas, layer.pageNumber, width, height, strokes, (signature) => {
+			if (layer.renderSignature === signature) return false;
+			layer.renderSignature = signature;
+			return true;
+		});
+	}
+
+	private renderPageCanvas(
+		canvas: HTMLCanvasElement,
+		pageNumber: number,
+		width: number,
+		height: number,
+		strokes: PdfInkStroke[],
+		shouldRender: (signature: string) => boolean
+	) {
+		const signature = this.pageRenderSignature(pageNumber, width, height, strokes);
+		if (!shouldRender(signature)) return;
+		const context = this.context(canvas);
+		const dpr = Math.min(window.devicePixelRatio || 1, 2);
 		context.setTransform(dpr, 0, 0, dpr, 0, 0);
 		context.clearRect(0, 0, width, height);
 		for (const stroke of strokes) {
-			renderStroke(context, scaleStrokeToSize(stroke, width, height), this.selectedStrokeIds.has(stroke.id) ? 0.45 : 1);
+			renderStrokeOnPage(context, stroke, width, height, this.selectedStrokeIds.has(stroke.id) ? 0.45 : 1, this.strokeRenderCache);
+		}
+	}
+
+	private pageRenderSignature(pageNumber: number, width: number, height: number, strokes: PdfInkStroke[]) {
+		const selected = this.selectedStrokeIds.size ? Array.from(this.selectedStrokeIds).sort().join(",") : "";
+		return [
+			pageNumber,
+			Math.round(width * 10),
+			Math.round(height * 10),
+			selected,
+			strokes.map(strokeSignature).join("|")
+		].join(":");
+	}
+
+	private pruneStrokeRenderCache() {
+		if (this.strokeRenderCache.size <= Math.max(256, this.data.strokes.length * 2)) return;
+		const liveIds = new Set(this.data.strokes.map((stroke) => stroke.id));
+		for (const id of Array.from(this.strokeRenderCache.keys())) {
+			if (!liveIds.has(id)) this.strokeRenderCache.delete(id);
 		}
 	}
 
@@ -804,8 +881,13 @@ export class PdfInkOverlay {
 		const rect = this.syncStageToInkTarget();
 		for (const canvas of [this.canvas, this.previewCanvas, this.predictionCanvas]) {
 			const dpr = Math.min(window.devicePixelRatio || 1, 2);
-			canvas.width = Math.max(1, Math.ceil(rect.width * dpr));
-			canvas.height = Math.max(1, Math.ceil(rect.height * dpr));
+			const width = Math.max(1, Math.ceil(rect.width * dpr));
+			const height = Math.max(1, Math.ceil(rect.height * dpr));
+			if (canvas.width !== width || canvas.height !== height) {
+				canvas.width = width;
+				canvas.height = height;
+				if (canvas === this.canvas) this.activeRenderSignature = "";
+			}
 			const context = this.context(canvas);
 			context.setTransform(dpr, 0, 0, dpr, 0, 0);
 		}
@@ -831,6 +913,7 @@ export class PdfInkOverlay {
 	private attachStageToPage(page: HTMLElement) {
 		if (this.stageHost === page && this.stage.parentElement === page) return;
 		this.restoreStageHostPosition();
+		this.activeRenderSignature = "";
 		this.stageHost = page;
 		this.originalStageHostPosition = page.style.position;
 		this.stageHostPositionChanged = getComputedStyle(page).position === "static";
@@ -999,22 +1082,111 @@ function predictStroke(stroke: PdfInkStroke): PdfInkStroke | null {
 
 function renderStroke(context: CanvasRenderingContext2D, stroke: PdfInkStroke, alphaScale = 1) {
 	if (stroke.points.length === 0) return;
+	const renderCache = buildStrokeRenderCache(stroke);
+	renderCachedStroke(context, stroke, renderCache, alphaScale);
+}
+
+function renderStrokeOnPage(
+	context: CanvasRenderingContext2D,
+	stroke: PdfInkStroke,
+	targetWidth: number,
+	targetHeight: number,
+	alphaScale: number,
+	cache: Map<string, PdfStrokeRenderCache>
+) {
+	if (stroke.points.length === 0) return;
+	const sourceWidth = Math.max(1, stroke.pageWidth || targetWidth);
+	const sourceHeight = Math.max(1, stroke.pageHeight || targetHeight);
+	const scaleX = Math.max(1, targetWidth) / sourceWidth;
+	const scaleY = Math.max(1, targetHeight) / sourceHeight;
+	let renderCache = cache.get(stroke.id);
+	const signature = strokeSignature(stroke);
+	if (!renderCache || renderCache.signature !== signature) {
+		renderCache = buildStrokeRenderCache(stroke, signature);
+		cache.set(stroke.id, renderCache);
+	}
+	context.save();
+	context.scale(scaleX, scaleY);
+	renderCachedStroke(context, stroke, renderCache, alphaScale);
+	context.restore();
+}
+
+function buildStrokeRenderCache(stroke: PdfInkStroke, signature = strokeSignature(stroke)): PdfStrokeRenderCache {
 	const options = getTldrawFreehandOptions(stroke, true);
 	const strokePoints = getStrokePoints(toTldrawPoints(stroke.points), options);
 	setStrokePointRadii(strokePoints, options);
+	const kind = stroke.tool === "highlighter" || stroke.tool === "ballpoint" ? "centerline" : "ink";
+	return {
+		signature,
+		kind,
+		strokePoints,
+		path: kind === "ink" ? createTldrawInkPath(strokePoints, options) : createCenterlinePath(strokePoints),
+		width: options.size ?? stroke.width,
+		options
+	};
+}
+
+function renderCachedStroke(
+	context: CanvasRenderingContext2D,
+	stroke: PdfInkStroke,
+	renderCache: PdfStrokeRenderCache,
+	alphaScale = 1
+) {
 	context.save();
 	context.fillStyle = stroke.color;
+	context.strokeStyle = stroke.color;
 	context.globalAlpha = (stroke.tool === "highlighter" ? 0.34 : 1) * alphaScale;
 	context.globalCompositeOperation = stroke.tool === "highlighter" ? "multiply" : "source-over";
 
-	if (stroke.tool === "highlighter" || stroke.tool === "ballpoint") {
-		strokeTldrawCenterline(context, strokePoints, options.size ?? stroke.width);
+	if (renderCache.kind === "centerline") {
+		context.lineWidth = Math.max(1, renderCache.width);
+		context.lineCap = "round";
+		context.lineJoin = "round";
+		if (renderCache.path) context.stroke(renderCache.path);
+		else strokeTldrawCenterline(context, renderCache.strokePoints, renderCache.width);
 		context.restore();
 		return;
 	}
 
-	drawTldrawInkStrokePoints(context, strokePoints, options);
+	if (renderCache.path) context.fill(renderCache.path);
+	else drawTldrawInkStrokePoints(context, renderCache.strokePoints, renderCache.options);
 	context.restore();
+}
+
+function createCenterlinePath(strokePoints: StrokePoint[]): Path2D | null {
+	if (typeof Path2D === "undefined" || strokePoints.length === 0) return null;
+	const points = strokePoints.map((point) => point.point);
+	if (points.length < 2) return null;
+	const path = new Path2D();
+	path.moveTo(points[0].x, points[0].y);
+	if (points.length === 2) {
+		path.lineTo(points[1].x, points[1].y);
+		return path;
+	}
+	let previousControl: PdfVector = points[1];
+	path.quadraticCurveTo(
+		points[1].x,
+		points[1].y,
+		(points[1].x + points[2].x) / 2,
+		(points[1].y + points[2].y) / 2
+	);
+	let current: PdfVector = { x: (points[1].x + points[2].x) / 2, y: (points[1].y + points[2].y) / 2 };
+	for (let index = 2, max = points.length - 1; index < max; index++) {
+		const reflected = {
+			x: current.x * 2 - previousControl.x,
+			y: current.y * 2 - previousControl.y
+		};
+		const end = {
+			x: (points[index].x + points[index + 1].x) / 2,
+			y: (points[index].y + points[index + 1].y) / 2
+		};
+		path.quadraticCurveTo(reflected.x, reflected.y, end.x, end.y);
+		previousControl = reflected;
+		current = end;
+	}
+	const last = points[points.length - 1];
+	path.lineTo(last.x, last.y);
+	return path;
 }
 
 interface PdfVector {
@@ -1155,6 +1327,22 @@ function distanceSquared(a: Pick<PdfInkPoint, "x" | "y">, b: Pick<PdfInkPoint, "
 
 function cloneStroke(stroke: PdfInkStroke): PdfInkStroke {
 	return { ...stroke, points: stroke.points.map((point) => ({ ...point })) };
+}
+
+function strokeSignature(stroke: PdfInkStroke): string {
+	const first = stroke.points[0];
+	const last = stroke.points[stroke.points.length - 1] || first;
+	return [
+		stroke.id,
+		stroke.tool,
+		stroke.width,
+		stroke.pageNumber,
+		Math.round((stroke.pageWidth || 0) * 10),
+		Math.round((stroke.pageHeight || 0) * 10),
+		stroke.points.length,
+		first ? `${Math.round(first.x * 10)},${Math.round(first.y * 10)},${Math.round(first.pressure * 100)}` : "",
+		last ? `${Math.round(last.x * 10)},${Math.round(last.y * 10)},${Math.round(last.pressure * 100)},${Math.round(last.t)}` : ""
+	].join(",");
 }
 
 function scaleStrokeToSize(stroke: PdfInkStroke, targetWidth: number, targetHeight: number, data?: PdfInkData): PdfInkStroke {

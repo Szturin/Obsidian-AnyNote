@@ -548,10 +548,25 @@ export function drawTldrawInkStrokePoints(
 	strokePoints: StrokePoint[],
 	options: StrokeOptions = {}
 ) {
+	const path = createTldrawInkPath(strokePoints, options);
+	if (path) {
+		context.fill(path);
+		return;
+	}
 	const partitions = partitionAtElbows(strokePoints);
 	for (const partition of partitions) {
 		drawTldrawInkPartition(context, partition, options);
 	}
+}
+
+export function createTldrawInkPath(strokePoints: StrokePoint[], options: StrokeOptions = {}): Path2D | null {
+	if (typeof Path2D === "undefined") return null;
+	const path = new Path2D();
+	const partitions = partitionAtElbows(strokePoints);
+	for (const partition of partitions) {
+		addTldrawInkPartitionToPath(path, partition, options);
+	}
+	return path;
 }
 
 function partitionAtElbows(points: StrokePoint[]): StrokePoint[][] {
@@ -697,6 +712,55 @@ function drawTldrawInkPartition(
 	context.fill();
 }
 
+function addTldrawInkPartitionToPath(path: Path2D, strokePoints: StrokePoint[], options: StrokeOptions = {}) {
+	if (strokePoints.length === 0) return;
+	if (strokePoints.length === 1) {
+		const point = strokePoints[0].point;
+		path.moveTo(point.x + strokePoints[0].radius, point.y);
+		path.arc(point.x, point.y, strokePoints[0].radius, 0, Math.PI * 2);
+		return;
+	}
+
+	const { left, right } = getStrokeOutlineTracks(strokePoints, options);
+	if (left.length === 0 || right.length === 0) return;
+
+	right.reverse();
+	path.moveTo(left[0].x, left[0].y);
+
+	let current = left[0];
+	let previousControl = left[0];
+	for (let index = 1; index < left.length; index++) {
+		const end = averageVec(left[index - 1], left[index]);
+		previousControl = smoothQuadraticPathTo(path, current, previousControl, end);
+		current = end;
+	}
+
+	const endPoint = strokePoints[strokePoints.length - 1];
+	const endRadius = endPoint.radius;
+	const endDirection = endPoint.vector.clone().per().neg();
+	const endArcStart = Vec.Add(endPoint.point, Vec.Mul(endDirection, endRadius));
+	const endArcEnd = Vec.Add(endPoint.point, Vec.Mul(endDirection, -endRadius));
+	path.lineTo(endArcStart.x, endArcStart.y);
+	addArcToPath(path, endPoint.point, endRadius, endArcStart, endArcEnd);
+	current = endArcEnd;
+	previousControl = endArcEnd;
+
+	for (let index = 1; index < right.length; index++) {
+		const end = averageVec(right[index - 1], right[index]);
+		previousControl = smoothQuadraticPathTo(path, current, previousControl, end);
+		current = end;
+	}
+
+	const startPoint = strokePoints[0];
+	const startRadius = startPoint.radius;
+	const startDirection = startPoint.vector.clone().per();
+	const startArcStart = Vec.Add(startPoint.point, Vec.Mul(startDirection, startRadius));
+	const startArcEnd = Vec.Add(startPoint.point, Vec.Mul(startDirection, -startRadius));
+	path.lineTo(startArcStart.x, startArcStart.y);
+	addArcToPath(path, startPoint.point, startRadius, startArcStart, startArcEnd);
+	path.closePath();
+}
+
 function smoothQuadraticTo(
 	context: CanvasRenderingContext2D,
 	current: Vec,
@@ -708,6 +772,12 @@ function smoothQuadraticTo(
 	return control;
 }
 
+function smoothQuadraticPathTo(path: Path2D, current: Vec, previousControl: Vec, end: Vec) {
+	const control = new Vec(current.x * 2 - previousControl.x, current.y * 2 - previousControl.y);
+	path.quadraticCurveTo(control.x, control.y, end.x, end.y);
+	return control;
+}
+
 function averageVec(a: Vec, b: Vec): Vec {
 	return new Vec((a.x + b.x) / 2, (a.y + b.y) / 2);
 }
@@ -716,4 +786,10 @@ function drawArcTo(context: CanvasRenderingContext2D, center: Vec, radius: numbe
 	const startAngle = Math.atan2(start.y - center.y, start.x - center.x);
 	const endAngle = Math.atan2(end.y - center.y, end.x - center.x);
 	context.arc(center.x, center.y, radius, startAngle, endAngle, false);
+}
+
+function addArcToPath(path: Path2D, center: Vec, radius: number, start: Vec, end: Vec) {
+	const startAngle = Math.atan2(start.y - center.y, start.x - center.x);
+	const endAngle = Math.atan2(end.y - center.y, end.x - center.x);
+	path.arc(center.x, center.y, radius, startAngle, endAngle, false);
 }
