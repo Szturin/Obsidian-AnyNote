@@ -96,6 +96,8 @@ export default class InkPlugin extends Plugin {
 
 export const inkPluginAtom = atom<InkPlugin>();
 
+let openPdfAnnotationPath: string | null = null;
+
 function implementWritingEmbedActions(plugin: InkPlugin) {
 	plugin.addCommand({
 		id: 'create-handwritten-section',
@@ -177,6 +179,23 @@ function showOnboardingTips_maybe(plugin: InkPlugin) {
 }
 
 function implementPdfAnnotationActions(plugin: InkPlugin) {
+	const openPdfAnnotation = (file: TFile) => {
+		if (openPdfAnnotationPath === file.path) return;
+		openPdfAnnotationPath = file.path;
+		new PdfInkModal(plugin.app, plugin, file, () => {
+			if (openPdfAnnotationPath === file.path) openPdfAnnotationPath = null;
+		}).open();
+	};
+
+	plugin.addRibbonIcon('pen-line', 'PDF 手写批注', () => {
+		const file = plugin.app.workspace.getActiveFile();
+		if (file instanceof TFile && file.extension.toLowerCase() === 'pdf') {
+			openPdfAnnotation(file);
+		} else {
+			new Notice('请先打开一个 PDF 文件');
+		}
+	});
+
 	plugin.addCommand({
 		id: 'annotate-pdf-with-ink',
 		name: 'PDF 手写批注',
@@ -184,7 +203,7 @@ function implementPdfAnnotationActions(plugin: InkPlugin) {
 			const file = plugin.app.workspace.getActiveFile();
 			const canAnnotate = file instanceof TFile && file.extension.toLowerCase() === 'pdf';
 			if (canAnnotate && !checking) {
-				new PdfInkModal(plugin.app, plugin, file).open();
+				openPdfAnnotation(file);
 			}
 			return canAnnotate;
 		}
@@ -197,9 +216,26 @@ function implementPdfAnnotationActions(plugin: InkPlugin) {
 					item
 						.setTitle('PDF 手写批注')
 						.setIcon('pen-line')
-						.onClick(() => new PdfInkModal(plugin.app, plugin, file).open());
+						.onClick(() => openPdfAnnotation(file));
 				});
 			}
 		})
 	);
+
+	plugin.registerEvent(
+		plugin.app.workspace.on('file-open', (file) => {
+			if (!plugin.settings.autoOpenPdfAnnotation) return;
+			if (file instanceof TFile && file.extension.toLowerCase() === 'pdf') {
+				window.setTimeout(() => openPdfAnnotation(file), 80);
+			}
+		})
+	);
+
+	plugin.app.workspace.onLayoutReady(() => {
+		if (!plugin.settings.autoOpenPdfAnnotation) return;
+		const file = plugin.app.workspace.getActiveFile();
+		if (file instanceof TFile && file.extension.toLowerCase() === 'pdf') {
+			window.setTimeout(() => openPdfAnnotation(file), 120);
+		}
+	});
 }

@@ -44,6 +44,7 @@ type PdfInkAction =
 export class PdfInkModal extends Modal {
 	private plugin: InkPlugin;
 	private file: TFile;
+	private onClosed?: () => void;
 	private data: PdfInkData;
 	private canvas: HTMLCanvasElement;
 	private previewCanvas: HTMLCanvasElement;
@@ -65,10 +66,11 @@ export class PdfInkModal extends Modal {
 	private redoStack: PdfInkAction[] = [];
 	private abortController: AbortController | null = null;
 
-	constructor(app: App, plugin: InkPlugin, file: TFile) {
+	constructor(app: App, plugin: InkPlugin, file: TFile, onClosed?: () => void) {
 		super(app);
 		this.plugin = plugin;
 		this.file = file;
+		this.onClosed = onClosed;
 	}
 
 	async onOpen() {
@@ -103,6 +105,7 @@ export class PdfInkModal extends Modal {
 		if (this.data) void this.writeCache();
 		this.abortController?.abort();
 		this.contentEl.empty();
+		this.onClosed?.();
 	}
 
 	private createToolbar(root: HTMLElement): HTMLElement {

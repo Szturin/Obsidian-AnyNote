@@ -15,6 +15,7 @@ export interface PluginSettings {
 	writingSubfolder: string,
 	drawingSubfolder: string,
 	autoSwitchToPenAfterErase: boolean,
+	autoOpenPdfAnnotation: boolean,
 	// Writing specific
 	writingEnabled: boolean,
 	writingStrokeLimit: number,
@@ -42,6 +43,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	writingSubfolder: 'Ink/Writing',
 	drawingSubfolder: 'Ink/Drawing',
 	autoSwitchToPenAfterErase: true,
+	autoOpenPdfAnnotation: true,
 	// Writing specific
 	writingEnabled: true,
 	writingStrokeLimit: 200,

@@ -158,6 +158,18 @@ function insertHighLevelSettings(containerEl: HTMLElement, plugin: InkPlugin, re
 			});
 		});
 
+	new Setting(containerEl)
+		.setClass('ddc_ink_setting')
+		.setName('打开 PDF 时自动进入批注')
+		.setDesc('开启后，打开 PDF 文件会自动显示 AnyNote 手写工具栏和批注画布。关闭后仍可通过命令、右键菜单或左侧按钮打开。')
+		.addToggle((toggle) => {
+			toggle.setValue(plugin.settings.autoOpenPdfAnnotation);
+			toggle.onChange(async (value) => {
+				plugin.settings.autoOpenPdfAnnotation = value;
+				await plugin.saveSettings();
+			});
+		});
+
 }
 
 function insertSubfolderSettings(containerEl: HTMLElement, plugin: InkPlugin, refresh: Function) {
