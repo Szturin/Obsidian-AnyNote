@@ -7109,22 +7109,6 @@
 .anynote-pdf-page-host {
   position: relative;
 }
-.anynote-pdf-passive-stage {
-  position: absolute;
-  inset: 0;
-  z-index: 29;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-  touch-action: none;
-}
-.anynote-pdf-passive-canvas {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-}
 .anynote-pdf-ink-canvas,
 .anynote-pdf-preview-canvas,
 .anynote-pdf-prediction-canvas {
