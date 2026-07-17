@@ -99,6 +99,8 @@ export class PdfInkOverlay {
 	private highlighterWidth = 18;
 	private eraserRadius = 18;
 	private pointerId: number | null = null;
+	private pointerStartedAt = 0;
+	private lastPointerEventAt = 0;
 	private currentStroke: PdfInkStroke | null = null;
 	private selectionStart: PdfInkPoint | null = null;
 	private selectedStrokeIds = new Set<string>();
@@ -296,8 +298,11 @@ export class PdfInkOverlay {
 		this.previewCanvas.addEventListener("pointerdown", (event) => this.onPointerDown(event), { signal, passive: false });
 		this.previewCanvas.addEventListener("pointermove", (event) => this.onPointerMove(event), { signal, passive: false });
 		this.previewCanvas.addEventListener("pointerrawupdate", (event) => this.onPointerMove(event as PointerEvent), { signal, passive: false });
-		this.previewCanvas.addEventListener("pointerup", (event) => this.onPointerUp(event), { signal, passive: false });
-		this.previewCanvas.addEventListener("pointercancel", (event) => this.onPointerUp(event), { signal, passive: false });
+		this.previewCanvas.addEventListener("pointerup", (event) => this.onPointerEnd(event), { signal, passive: false });
+		this.previewCanvas.addEventListener("pointercancel", (event) => this.onPointerEnd(event), { signal, passive: false });
+		this.previewCanvas.addEventListener("lostpointercapture", (event) => this.onPointerLost(event as PointerEvent), { signal, passive: false });
+		window.addEventListener("pointerup", (event) => this.onPointerEnd(event), { signal, passive: false });
+		window.addEventListener("pointercancel", (event) => this.onPointerEnd(event), { signal, passive: false });
 		window.addEventListener("resize", () => {
 			this.scheduleDeferredResizeRender();
 		}, { signal });
@@ -314,12 +319,15 @@ export class PdfInkOverlay {
 	}
 
 	private onPointerDown(event: PointerEvent) {
+		if (this.pointerId !== null) this.recoverInterruptedPointer(event);
 		if (this.pointerId !== null) return;
 		const activeTool = this.getActiveTool(event);
 		if (activeTool === "hand") return;
 		event.preventDefault();
 		this.clearCanvas(this.predictionCanvas);
 		this.pointerId = event.pointerId;
+		this.pointerStartedAt = event.timeStamp || performance.now();
+		this.lastPointerEventAt = this.pointerStartedAt;
 		this.previewCanvas.setPointerCapture(event.pointerId);
 		const point = this.eventToPoint(event);
 		this.clearSelection();
@@ -352,6 +360,7 @@ export class PdfInkOverlay {
 	private onPointerMove(event: PointerEvent) {
 		if (this.pointerId !== event.pointerId) return;
 		event.preventDefault();
+		this.lastPointerEventAt = event.timeStamp || performance.now();
 		this.clearCanvas(this.predictionCanvas);
 		const points = getCoalesced(event).map((item) => this.eventToPoint(item));
 		const activeTool = this.getActiveTool(event);
@@ -377,30 +386,54 @@ export class PdfInkOverlay {
 		this.renderPrediction();
 	}
 
-	private onPointerUp(event: PointerEvent) {
+	private onPointerEnd(event: PointerEvent) {
 		if (this.pointerId !== event.pointerId) return;
 		event.preventDefault();
-		if (this.previewCanvas.hasPointerCapture(event.pointerId)) this.previewCanvas.releasePointerCapture(event.pointerId);
-		this.pointerId = null;
+		this.finishActivePointer(event);
+	}
 
-		if (this.currentStroke) {
-			const stroke = cloneStroke(this.currentStroke);
-			this.data.strokes.push(stroke);
-			this.undoStack.push({ type: "add", stroke });
-			this.lastFinishedStroke = {
-				stroke: cloneStroke(stroke),
-				index: this.data.strokes.length - 1,
-				finishedAt: performance.now(),
-				pointerType: event.pointerType
-			};
-			this.redoStack = [];
-			this.currentStroke = null;
-			this.clearCanvas(this.previewCanvas);
-			this.clearCanvas(this.predictionCanvas);
-			this.renderAll();
-		}
+	private onPointerLost(event: PointerEvent) {
+		if (this.pointerId !== event.pointerId) return;
+		this.finishActivePointer(event);
+	}
+
+	private recoverInterruptedPointer(event: PointerEvent) {
+		const now = event.timeStamp || performance.now();
+		if (event.pointerId === this.pointerId) return;
+		if (now - this.lastPointerEventAt < 24 && now - this.pointerStartedAt < 60) return;
+		this.finishActivePointer(event);
+	}
+
+	private finishActivePointer(event: PointerEvent, releaseCapture = true) {
+		const activePointerId = this.pointerId;
+		if (activePointerId === null) return;
+		if (releaseCapture && this.previewCanvas.hasPointerCapture(activePointerId)) this.previewCanvas.releasePointerCapture(activePointerId);
+		this.pointerId = null;
+		this.pointerStartedAt = 0;
+		this.lastPointerEventAt = 0;
+
+		if (this.currentStroke) this.commitCurrentStroke(event);
 		this.selectionStart = null;
 		this.finishTemporaryEraser();
+	}
+
+	private commitCurrentStroke(event: PointerEvent) {
+		if (!this.currentStroke) return;
+		const stroke = cloneStroke(this.currentStroke);
+		this.data.strokes.push(stroke);
+		this.undoStack.push({ type: "add", stroke });
+		this.lastFinishedStroke = {
+			stroke: cloneStroke(stroke),
+			index: this.data.strokes.length - 1,
+			finishedAt: performance.now(),
+			pointerType: event.pointerType
+		};
+		this.redoStack = [];
+		this.currentStroke = null;
+		this.clearCanvas(this.previewCanvas);
+		this.clearCanvas(this.predictionCanvas);
+		this.activeRenderSignature = "";
+		this.scheduleRenderAll();
 	}
 
 	private setTool(tool: PdfInkTool) {
