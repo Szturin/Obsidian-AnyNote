@@ -5,7 +5,7 @@
 - 插件 id：`obsidian-anynote`
 - 插件名：`Obsidian AnyNote`
 - npm 包名：`obsidian-anynote`
-- 当前版本：`0.2.9`
+- 当前版本：`0.2.10`
 - 目标 GitHub 仓库：`Szturin/Obsidian-AnyNote`
 
 ## 必须遵守的许可边界
@@ -38,6 +38,7 @@ npm run build
 - `src/main.ts`：插件入口，注册手写、绘图和 PDF 批注命令。
 - `src/pdf/pdf-ink-modal.ts`：PDF 原生视图页级覆盖层和 Canvas 手写核心。
 - `src/pdf/pdf-ink-modal.scss`：PDF 批注工具栏和覆盖层样式。
+- `src/pdf/tldraw-freehand.ts`：PDF 手写使用的 tldraw/freehand stroke points、半径和轮廓算法本地实现。
 - `src/tldraw/writing/tldraw-writing-editor.tsx`：手写编辑器。
 - `src/tldraw/drawing/tldraw-drawing-editor.tsx`：绘图编辑器。
 - `LOCAL_LEARNING_NOTICE.md`：本地学习和发布限制说明。
@@ -65,7 +66,7 @@ PDF 批注是原生 PDF 视图内的页级 JSON 批注：
 
 ## BRAT 发布准备
 
-`.github/workflows/release.yml` 会在推送版本标签时构建并上传 BRAT 需要的 release assets。优先使用与 `manifest.json` 版本一致的标签，例如 `0.2.9`。
+`.github/workflows/release.yml` 会在推送版本标签时构建并上传 BRAT 需要的 release assets。优先使用与 `manifest.json` 版本一致的标签，例如 `0.2.10`。
 
 - `main.js`
 - `manifest.json`
@@ -79,7 +80,7 @@ PDF 批注是原生 PDF 视图内的页级 JSON 批注：
 优先改 `src/pdf/pdf-ink-modal.ts`：
 
 - 增加笔画预测层。
-- 继续对齐 tldraw/freehand 的速度、压力和曲率笔迹模型。
+- PDF 笔迹已经切到 tldraw/freehand 同构算法；后续重点是 iPad Pencil 实机采样、预测和大批量 stroke 性能。
 - 为橡皮/框选增加空间索引。
 - 将页级 JSON 批注升级为更接近 PDF 原生 annotation object 的模型。
 - 避免每次输入都全量重绘。
