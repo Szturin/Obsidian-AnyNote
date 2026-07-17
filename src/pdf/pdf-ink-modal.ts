@@ -10,6 +10,7 @@ interface PdfInkPoint {
 	y: number;
 	t: number;
 	pressure: number;
+	velocity?: number;
 }
 
 interface PdfInkStroke {
@@ -46,6 +47,7 @@ export class PdfInkModal extends Modal {
 	private data: PdfInkData;
 	private canvas: HTMLCanvasElement;
 	private previewCanvas: HTMLCanvasElement;
+	private predictionCanvas: HTMLCanvasElement;
 	private selectionBox: HTMLElement;
 	private tool: PdfInkTool = "pen";
 	private previousDrawingTool: Exclude<PdfInkTool, "eraser" | "select"> = "pen";
@@ -57,7 +59,6 @@ export class PdfInkModal extends Modal {
 	private eraserRadius = 18;
 	private pointerId: number | null = null;
 	private currentStroke: PdfInkStroke | null = null;
-	private renderedPointCount = 0;
 	private selectionStart: PdfInkPoint | null = null;
 	private selectedStrokeIds = new Set<string>();
 	private undoStack: PdfInkAction[] = [];
@@ -86,6 +87,7 @@ export class PdfInkModal extends Modal {
 
 		this.canvas = stage.createEl("canvas", { cls: "anynote-pdf-ink-canvas" });
 		this.previewCanvas = stage.createEl("canvas", { cls: "anynote-pdf-preview-canvas" });
+		this.predictionCanvas = stage.createEl("canvas", { cls: "anynote-pdf-prediction-canvas" });
 		this.selectionBox = stage.createDiv({ cls: "anynote-pdf-selection-box" });
 		const toolbar = this.createToolbar(root);
 		root.appendChild(toolbar);
@@ -161,6 +163,7 @@ export class PdfInkModal extends Modal {
 	private onPointerDown(event: PointerEvent) {
 		event.preventDefault();
 		if (this.pointerId !== null) return;
+		this.clearCanvas(this.predictionCanvas);
 		this.pointerId = event.pointerId;
 		this.previewCanvas.setPointerCapture(event.pointerId);
 		const point = this.eventToPoint(event);
@@ -185,13 +188,13 @@ export class PdfInkModal extends Modal {
 			width: activeTool === "highlighter" ? this.highlighterWidth : this.width,
 			points: [point]
 		};
-		this.renderedPointCount = 0;
-		this.renderCurrentIncrement();
+		this.renderCurrentStroke();
 	}
 
 	private onPointerMove(event: PointerEvent) {
 		if (this.pointerId !== event.pointerId) return;
 		event.preventDefault();
+		this.clearCanvas(this.predictionCanvas);
 		const points = getCoalesced(event).map((item) => this.eventToPoint(item));
 		const activeTool = this.getActiveTool(event);
 
@@ -210,11 +213,10 @@ export class PdfInkModal extends Modal {
 
 		if (!this.currentStroke) return;
 		for (const point of points) {
-			const last = this.currentStroke.points[this.currentStroke.points.length - 1];
-			if (last && distanceSquared(last, point) < 0.25) continue;
-			this.currentStroke.points.push(smoothPoint(last, point, 0.16));
+			this.appendStrokePoint(this.currentStroke, point);
 		}
-		this.renderCurrentIncrement();
+		this.renderCurrentStroke();
+		this.renderPrediction();
 	}
 
 	private onPointerUp(event: PointerEvent) {
@@ -229,8 +231,8 @@ export class PdfInkModal extends Modal {
 			this.undoStack.push({ type: "add", stroke });
 			this.redoStack = [];
 			this.currentStroke = null;
-			this.renderedPointCount = 0;
 			this.clearCanvas(this.previewCanvas);
+			this.clearCanvas(this.predictionCanvas);
 			this.renderAll();
 		}
 		this.selectionStart = null;
@@ -241,6 +243,7 @@ export class PdfInkModal extends Modal {
 		if (tool === "pen" || tool === "ballpoint" || tool === "highlighter") {
 			this.previousDrawingTool = tool;
 		}
+		this.clearCanvas(this.predictionCanvas);
 		this.tool = tool;
 		this.temporaryEraserActive = false;
 	}
@@ -265,18 +268,38 @@ export class PdfInkModal extends Modal {
 		this.tool = this.previousDrawingTool;
 	}
 
-	private renderCurrentIncrement() {
+	private appendStrokePoint(stroke: PdfInkStroke, point: PdfInkPoint) {
+		const last = stroke.points[stroke.points.length - 1];
+		if (!last) {
+			stroke.points.push(point);
+			return;
+		}
+		const minDistance = stroke.tool === "highlighter" ? 0.55 : 0.16;
+		if (distanceSquared(last, point) < minDistance * minDistance) return;
+		stroke.points.push(smoothPoint(last, point));
+	}
+
+	private renderCurrentStroke() {
+		this.clearCanvas(this.previewCanvas);
 		if (!this.currentStroke) return;
 		const context = this.context(this.previewCanvas);
-		renderStrokeRange(context, this.currentStroke, Math.max(0, this.renderedPointCount - 1));
-		this.renderedPointCount = this.currentStroke.points.length;
+		renderStroke(context, this.currentStroke);
+	}
+
+	private renderPrediction() {
+		this.clearCanvas(this.predictionCanvas);
+		if (!this.currentStroke) return;
+		const predicted = predictStroke(this.currentStroke);
+		if (!predicted) return;
+		const context = this.context(this.predictionCanvas);
+		renderStroke(context, predicted, 0.32);
 	}
 
 	private renderAll() {
 		this.clearCanvas(this.canvas);
 		const context = this.context(this.canvas);
 		for (const stroke of this.data?.strokes || []) {
-			renderStrokeRange(context, stroke, 0, this.selectedStrokeIds.has(stroke.id) ? 0.45 : 1);
+			renderStroke(context, stroke, this.selectedStrokeIds.has(stroke.id) ? 0.45 : 1);
 		}
 	}
 
@@ -378,14 +401,15 @@ export class PdfInkModal extends Modal {
 			.map((stroke) => ({
 				...stroke,
 				width: clamp(stroke.width, 0.5, 80),
-				points: stroke.points
+				points: restorePointVelocities(stroke.points
 					.filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
 					.map((point) => ({
 						x: point.x,
 						y: point.y,
 						t: Number.isFinite(point.t) ? point.t : Date.now(),
-						pressure: clamp(Number.isFinite(point.pressure) ? point.pressure : 0.5, 0.05, 1)
-					}))
+						pressure: clamp(Number.isFinite(point.pressure) ? point.pressure : 0.5, 0.05, 1),
+						velocity: Number.isFinite(point.velocity) ? point.velocity : undefined
+					})))
 			}))
 			.filter((stroke) => stroke.points.length > 0);
 
@@ -443,7 +467,7 @@ export class PdfInkModal extends Modal {
 
 	private resizeCanvases() {
 		const rect = this.previewCanvas.getBoundingClientRect();
-		for (const canvas of [this.canvas, this.previewCanvas]) {
+		for (const canvas of [this.canvas, this.previewCanvas, this.predictionCanvas]) {
 			const dpr = Math.min(window.devicePixelRatio || 1, 2);
 			canvas.width = Math.max(1, Math.ceil(rect.width * dpr));
 			canvas.height = Math.max(1, Math.ceil(rect.height * dpr));
@@ -457,7 +481,7 @@ export class PdfInkModal extends Modal {
 		return {
 			x: event.clientX - rect.left,
 			y: event.clientY - rect.top,
-			t: Date.now(),
+			t: event.timeStamp || performance.now(),
 			pressure: Math.max(0.05, Math.min(1, event.pressure || 0.5))
 		};
 	}
@@ -495,17 +519,54 @@ function isHardwareEraserEvent(event: PointerEvent): boolean {
 	return event.pointerType === "pen" && (event.button === 5 || (event.buttons & 32) === 32);
 }
 
-function smoothPoint(last: PdfInkPoint | undefined, point: PdfInkPoint, amount: number): PdfInkPoint {
+function smoothPoint(last: PdfInkPoint | undefined, point: PdfInkPoint): PdfInkPoint {
 	if (!last) return point;
+	const distance = Math.sqrt(distanceSquared(last, point));
+	const dt = Math.max(1, point.t - last.t);
+	const velocity = distance / dt;
+	const alpha = clamp(distance / 9, 0.46, 0.92);
 	return {
 		...point,
-		x: last.x + (point.x - last.x) * (1 - amount),
-		y: last.y + (point.y - last.y) * (1 - amount),
-		pressure: last.pressure + (point.pressure - last.pressure) * 0.65
+		x: last.x + (point.x - last.x) * alpha,
+		y: last.y + (point.y - last.y) * alpha,
+		pressure: last.pressure + (point.pressure - last.pressure) * 0.72,
+		velocity: last.velocity === undefined ? velocity : last.velocity * 0.62 + velocity * 0.38
 	};
 }
 
-function renderStrokeRange(context: CanvasRenderingContext2D, stroke: PdfInkStroke, startIndex: number, alphaScale = 1) {
+function predictStroke(stroke: PdfInkStroke): PdfInkStroke | null {
+	if (stroke.tool === "highlighter" || stroke.points.length < 3) return null;
+	const points = stroke.points;
+	const a = points[points.length - 3];
+	const b = points[points.length - 2];
+	const c = points[points.length - 1];
+	const dt = Math.max(1, c.t - b.t);
+	const vx = (c.x - b.x) / dt;
+	const vy = (c.y - b.y) / dt;
+	const previousVx = (b.x - a.x) / Math.max(1, b.t - a.t);
+	const previousVy = (b.y - a.y) / Math.max(1, b.t - a.t);
+	const blendedVx = vx * 0.72 + previousVx * 0.28;
+	const blendedVy = vy * 0.72 + previousVy * 0.28;
+	const speed = Math.sqrt(blendedVx * blendedVx + blendedVy * blendedVy);
+	if (speed < 0.08) return null;
+	const horizonMs = clamp(18 + speed * 10, 18, 32);
+	const maxDistance = stroke.tool === "ballpoint" ? 18 : 24;
+	const dx = clamp(blendedVx * horizonMs, -maxDistance, maxDistance);
+	const dy = clamp(blendedVy * horizonMs, -maxDistance, maxDistance);
+	const predictedPoint: PdfInkPoint = {
+		x: c.x + dx,
+		y: c.y + dy,
+		t: c.t + horizonMs,
+		pressure: c.pressure,
+		velocity: c.velocity
+	};
+	return {
+		...stroke,
+		points: [b, c, predictedPoint]
+	};
+}
+
+function renderStroke(context: CanvasRenderingContext2D, stroke: PdfInkStroke, alphaScale = 1) {
 	if (stroke.points.length === 0) return;
 	context.save();
 	context.lineCap = "round";
@@ -522,17 +583,45 @@ function renderStrokeRange(context: CanvasRenderingContext2D, stroke: PdfInkStro
 		context.restore();
 		return;
 	}
-	for (let index = Math.max(1, startIndex + 1); index < stroke.points.length; index++) {
-		const a = stroke.points[index - 1];
-		const b = stroke.points[index];
+	if (stroke.points.length === 2) {
+		const a = stroke.points[0];
+		const b = stroke.points[1];
 		context.beginPath();
 		context.moveTo(a.x, a.y);
 		context.lineTo(b.x, b.y);
-		const pressure = stroke.tool === "ballpoint" ? 0.82 : (a.pressure + b.pressure) / 2;
-		context.lineWidth = Math.max(0.5, stroke.width * (0.45 + pressure * 0.75));
+		context.lineWidth = strokeWidthAt(stroke, b);
 		context.stroke();
+		context.restore();
+		return;
 	}
+	context.beginPath();
+	context.moveTo(stroke.points[0].x, stroke.points[0].y);
+	for (let index = 1; index < stroke.points.length - 1; index++) {
+		const control = stroke.points[index];
+		const next = stroke.points[index + 1];
+		const midX = (control.x + next.x) / 2;
+		const midY = (control.y + next.y) / 2;
+		context.lineWidth = strokeWidthAt(stroke, control);
+		context.quadraticCurveTo(control.x, control.y, midX, midY);
+		context.stroke();
+		context.beginPath();
+		context.moveTo(midX, midY);
+	}
+	const beforeLast = stroke.points[stroke.points.length - 2];
+	const last = stroke.points[stroke.points.length - 1];
+	context.lineWidth = strokeWidthAt(stroke, last);
+	context.quadraticCurveTo(beforeLast.x, beforeLast.y, last.x, last.y);
+	context.stroke();
 	context.restore();
+}
+
+function strokeWidthAt(stroke: PdfInkStroke, point: PdfInkPoint) {
+	if (stroke.tool === "highlighter") return stroke.width;
+	if (stroke.tool === "ballpoint") return Math.max(0.5, stroke.width * 0.96);
+	const velocity = point.velocity ?? 0.4;
+	const velocityFactor = clamp(1.18 - velocity * 0.34, 0.72, 1.18);
+	const pressureFactor = 0.54 + clamp(point.pressure, 0.05, 1) * 0.68;
+	return Math.max(0.45, stroke.width * velocityFactor * pressureFactor);
 }
 
 function strokeIntersectsPoint(stroke: PdfInkStroke, point: PdfInkPoint, radius: number) {
@@ -573,6 +662,19 @@ function cloneStroke(stroke: PdfInkStroke): PdfInkStroke {
 	return { ...stroke, points: stroke.points.map((point) => ({ ...point })) };
 }
 
+function restorePointVelocities(points: PdfInkPoint[]): PdfInkPoint[] {
+	return points.map((point, index) => {
+		const previous = points[index - 1];
+		if (point.velocity !== undefined || !previous) return point;
+		const distance = Math.sqrt(distanceSquared(previous, point));
+		const dt = Math.max(1, point.t - previous.t);
+		return {
+			...point,
+			velocity: distance / dt
+		};
+	});
+}
+
 function drawPdfInkOnPage(page: PDFPage, data: PdfInkData) {
 	const { width: pageWidth, height: pageHeight } = page.getSize();
 	const sourceWidth = Math.max(1, data.width);
@@ -601,11 +703,10 @@ function drawPdfInkOnPage(page: PDFPage, data: PdfInkData) {
 			const b = stroke.points[index];
 			const start = toPdfPoint(a, sourceWidth, sourceHeight, pageWidth, pageHeight);
 			const end = toPdfPoint(b, sourceWidth, sourceHeight, pageWidth, pageHeight);
-			const pressure = stroke.tool === "ballpoint" ? 0.82 : (a.pressure + b.pressure) / 2;
 			page.drawLine({
 				start,
 				end,
-				thickness: Math.max(0.25, stroke.width * scale * (0.45 + pressure * 0.75)),
+				thickness: Math.max(0.25, strokeWidthAt(stroke, b) * scale),
 				color: parseRgb(stroke.color),
 				opacity: stroke.tool === "highlighter" ? 0.34 : 1
 			});

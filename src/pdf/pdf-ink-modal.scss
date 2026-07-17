@@ -38,7 +38,8 @@
 }
 
 .anynote-pdf-ink-canvas,
-.anynote-pdf-preview-canvas {
+.anynote-pdf-preview-canvas,
+.anynote-pdf-prediction-canvas {
 	position: absolute;
 	inset: 0;
 	width: 100%;
@@ -54,6 +55,11 @@
 	z-index: 12;
 	touch-action: none;
 	cursor: crosshair;
+}
+
+.anynote-pdf-prediction-canvas {
+	z-index: 11;
+	pointer-events: none;
 }
 
 .anynote-pdf-selection-box {
