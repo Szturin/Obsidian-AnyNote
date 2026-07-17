@@ -3,7 +3,7 @@ import { App, Notice, TFile, normalizePath, setIcon } from "obsidian";
 import { PDFDocument, PDFPage, rgb } from "pdf-lib";
 import type InkPlugin from "../main";
 
-type PdfInkTool = "pen" | "ballpoint" | "highlighter" | "eraser" | "select";
+type PdfInkTool = "hand" | "pen" | "ballpoint" | "highlighter" | "eraser" | "select";
 
 interface PdfInkPoint {
 	x: number;
@@ -15,7 +15,7 @@ interface PdfInkPoint {
 
 interface PdfInkStroke {
 	id: string;
-	tool: Exclude<PdfInkTool, "eraser" | "select">;
+	tool: Exclude<PdfInkTool, "hand" | "eraser" | "select">;
 	color: string;
 	width: number;
 	points: PdfInkPoint[];
@@ -54,7 +54,8 @@ export class PdfInkOverlay {
 	private predictionCanvas: HTMLCanvasElement;
 	private selectionBox: HTMLElement;
 	private tool: PdfInkTool = "pen";
-	private previousDrawingTool: Exclude<PdfInkTool, "eraser" | "select"> = "pen";
+	private previousDrawingTool: Exclude<PdfInkTool, "hand" | "eraser" | "select"> = "pen";
+	private toolButtons = new Map<PdfInkTool, HTMLButtonElement>();
 	private temporaryEraserActive = false;
 	private color = "#111111";
 	private highlighterColor = "#ffd54a";
@@ -94,6 +95,7 @@ export class PdfInkOverlay {
 		this.selectionBox = this.stage.createDiv({ cls: "anynote-pdf-selection-box" });
 		const toolbar = this.createToolbar(this.root);
 		this.root.appendChild(toolbar);
+		this.updateToolUi();
 
 		await nextFrame();
 		this.resizeCanvases();
@@ -122,11 +124,12 @@ export class PdfInkOverlay {
 	private createToolbar(root: HTMLElement): HTMLElement {
 		const toolbar = root.createDiv({ cls: "anynote-pdf-toolbar" });
 		const tools = toolbar.createDiv({ cls: "anynote-toolbar-group" });
-		this.iconButton(tools, "pen-line", "普通笔", () => this.setTool("pen"));
-		this.iconButton(tools, "circle-dot", "原子笔", () => this.setTool("ballpoint"));
-		this.iconButton(tools, "highlighter", "荧光笔", () => this.setTool("highlighter"));
-		this.iconButton(tools, "eraser", "橡皮擦", () => this.setTool("eraser"));
-		this.iconButton(tools, "scan", "框选", () => this.setTool("select"));
+		this.toolButton(tools, "hand", "hand", "手/浏览");
+		this.toolButton(tools, "pen", "pen-line", "普通笔");
+		this.toolButton(tools, "ballpoint", "circle-dot", "原子笔");
+		this.toolButton(tools, "highlighter", "highlighter", "荧光笔");
+		this.toolButton(tools, "eraser", "eraser", "橡皮擦");
+		this.toolButton(tools, "select", "scan", "框选");
 
 		const controls = toolbar.createDiv({ cls: "anynote-toolbar-group" });
 		const colorInput = controls.createEl("input", { attr: { type: "color", "aria-label": "颜色" }, cls: "anynote-color" });
@@ -161,6 +164,14 @@ export class PdfInkOverlay {
 		return button;
 	}
 
+	private toolButton(parent: HTMLElement, tool: PdfInkTool, icon: string, label: string) {
+		const button = this.iconButton(parent, icon, label, () => this.setTool(tool));
+		button.addClass("anynote-tool-button");
+		button.setAttr("aria-pressed", tool === this.tool ? "true" : "false");
+		this.toolButtons.set(tool, button);
+		return button;
+	}
+
 	private installEvents() {
 		const signal = this.abortController?.signal;
 		this.previewCanvas.addEventListener("pointerdown", (event) => this.onPointerDown(event), { signal, passive: false });
@@ -180,14 +191,15 @@ export class PdfInkOverlay {
 	}
 
 	private onPointerDown(event: PointerEvent) {
-		event.preventDefault();
 		if (this.pointerId !== null) return;
+		const activeTool = this.getActiveTool(event);
+		if (activeTool === "hand") return;
+		event.preventDefault();
 		this.clearCanvas(this.predictionCanvas);
 		this.pointerId = event.pointerId;
 		this.previewCanvas.setPointerCapture(event.pointerId);
 		const point = this.eventToPoint(event);
 		this.clearSelection();
-		const activeTool = this.getActiveTool(event);
 
 		if (activeTool === "eraser") {
 			this.eraseAt(point);
@@ -265,6 +277,21 @@ export class PdfInkOverlay {
 		this.clearCanvas(this.predictionCanvas);
 		this.tool = tool;
 		this.temporaryEraserActive = false;
+		this.updateToolUi();
+	}
+
+	private updateToolUi() {
+		for (const [tool, button] of this.toolButtons) {
+			const active = tool === this.tool;
+			button.toggleClass("is-active", active);
+			button.setAttr("aria-pressed", active ? "true" : "false");
+		}
+		const handMode = this.tool === "hand";
+		this.previewCanvas?.toggleClass("is-hand-mode", handMode);
+		if (this.previewCanvas) {
+			this.previewCanvas.style.pointerEvents = handMode ? "none" : "auto";
+			this.previewCanvas.style.cursor = handMode ? "grab" : "crosshair";
+		}
 	}
 
 	private getActiveTool(event: PointerEvent): PdfInkTool {
@@ -285,6 +312,7 @@ export class PdfInkOverlay {
 		this.temporaryEraserActive = false;
 		if (!this.plugin.settings.autoSwitchToPenAfterErase) return;
 		this.tool = this.previousDrawingTool;
+		this.updateToolUi();
 	}
 
 	private appendStrokePoint(stroke: PdfInkStroke, point: PdfInkPoint) {

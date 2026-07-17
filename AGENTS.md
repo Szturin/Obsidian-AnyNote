@@ -5,7 +5,7 @@
 - 插件 id：`obsidian-anynote`
 - 插件名：`Obsidian AnyNote`
 - npm 包名：`obsidian-anynote`
-- 当前版本：`0.2.4`
+- 当前版本：`0.2.5`
 - 目标 GitHub 仓库：`Szturin/Obsidian-AnyNote`
 
 ## 必须遵守的许可边界
@@ -54,10 +54,12 @@ PDF 批注是原生 PDF 视图内的覆盖层 JSON 批注：
 - 用户点击 `导出带批注 PDF` 时，会额外生成新的 `*.anynote.pdf`，并以矢量线段写入当前批注。
 - 当前 PDF 导出只映射到第一页；多页逐页模型仍待实现。
 - 工具栏直接挂载在 Obsidian 当前 PDF leaf 的 `.view-content` 内，不再创建 modal、iframe 或独立窗口。
+- 工具栏包含“手/浏览”模式；该模式会让底层 PDF 接收拖动和滚动事件。
+- 当前工具按钮必须有 `is-active`/`aria-pressed` 选中状态。
 
 ## BRAT 发布准备
 
-`.github/workflows/release.yml` 会在推送版本标签时构建并上传 BRAT 需要的 release assets。优先使用与 `manifest.json` 版本一致的标签，例如 `0.2.4`。
+`.github/workflows/release.yml` 会在推送版本标签时构建并上传 BRAT 需要的 release assets。优先使用与 `manifest.json` 版本一致的标签，例如 `0.2.5`。
 
 - `main.js`
 - `manifest.json`
