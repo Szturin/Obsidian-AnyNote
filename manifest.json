@@ -1,0 +1,9 @@
+{
+  "id": "obsidian-anynote",
+  "name": "Obsidian AnyNote",
+  "version": "0.1.0",
+  "minAppVersion": "0.15.0",
+  "description": "Local-learning Obsidian ink workspace with Chinese UI, handwriting embeds, drawings, and PDF ink annotations.",
+  "author": "Local",
+  "isDesktopOnly": false
+}

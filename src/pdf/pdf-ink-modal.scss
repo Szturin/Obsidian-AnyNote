@@ -1,0 +1,141 @@
+.anynote-pdf-modal {
+	width: 100vw;
+	height: 100vh;
+	max-width: none;
+	max-height: none;
+}
+
+.anynote-pdf-modal .modal-close-button {
+	display: none;
+}
+
+.anynote-pdf-content {
+	width: 100%;
+	height: 100%;
+	padding: 0;
+}
+
+.anynote-pdf-root {
+	position: relative;
+	width: 100%;
+	height: 100%;
+	overflow: hidden;
+	background: var(--background-secondary);
+}
+
+.anynote-pdf-stage {
+	position: absolute;
+	inset: 0;
+}
+
+.anynote-pdf-frame {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	border: 0;
+	background: var(--background-primary);
+}
+
+.anynote-pdf-ink-canvas,
+.anynote-pdf-preview-canvas {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+}
+
+.anynote-pdf-ink-canvas {
+	z-index: 10;
+	pointer-events: none;
+}
+
+.anynote-pdf-preview-canvas {
+	z-index: 12;
+	touch-action: none;
+	cursor: crosshair;
+}
+
+.anynote-pdf-selection-box {
+	position: absolute;
+	z-index: 14;
+	display: none;
+	box-sizing: border-box;
+	border: 1px dashed var(--interactive-accent);
+	border-radius: 6px;
+	background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+	pointer-events: none;
+}
+
+.anynote-pdf-toolbar {
+	position: absolute;
+	left: 50%;
+	bottom: max(18px, env(safe-area-inset-bottom));
+	z-index: 20;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	max-width: calc(100% - 18px);
+	padding: 7px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--background-primary) 92%, transparent);
+	box-shadow: var(--shadow-l);
+	transform: translateX(-50%);
+	backdrop-filter: blur(18px) saturate(1.25);
+	-webkit-backdrop-filter: blur(18px) saturate(1.25);
+	overflow-x: auto;
+}
+
+.anynote-toolbar-group {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	flex: 0 0 auto;
+}
+
+.anynote-toolbar-group + .anynote-toolbar-group {
+	padding-left: 8px;
+	border-left: 1px solid var(--background-modifier-border);
+}
+
+.anynote-icon-button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 34px;
+	height: 34px;
+	min-width: 34px;
+	min-height: 34px;
+	padding: 0;
+	border: 0;
+	border-radius: 999px;
+	background: var(--background-secondary);
+	color: var(--text-muted);
+	box-shadow: inset 0 0 0 1px var(--background-modifier-border);
+	cursor: pointer;
+}
+
+.anynote-icon-button:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.anynote-icon-button svg {
+	width: 18px;
+	height: 18px;
+}
+
+.anynote-color {
+	width: 34px;
+	height: 34px;
+	padding: 0;
+	border: 0;
+	border-radius: 999px;
+	background: transparent;
+}
+
+.anynote-width {
+	width: 118px;
+	accent-color: var(--interactive-accent);
+}

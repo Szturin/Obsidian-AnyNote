@@ -1,0 +1,45 @@
+# Obsidian AnyNote 工程总结
+
+## 项目定位
+
+Obsidian AnyNote 是一个本地学习实验工程，用来研究 Obsidian 内的手写、绘图和 PDF 批注体验。当前代码集成了 `obsidian_ink` 的功能形态，并增加了中文命令和 PDF 覆盖层批注 MVP。
+
+## 关键能力
+
+- Markdown 手写区域和绘图区域。
+- tldraw 驱动的手写/绘图编辑体验。
+- 中文命令入口。
+- PDF 上方叠加 Canvas 标注层。
+- PDF 普通笔、原子笔、荧光笔、橡皮擦、框选、撤销、重做、保存。
+- PDF 批注保存为插件目录内 JSON，不修改 PDF，不创建附件。
+
+## 手写体验实现要点
+
+- 使用 Pointer Events 统一鼠标、触摸和触控笔输入。
+- 使用 `pointerrawupdate` 获取更高频输入。
+- 使用 `getCoalescedEvents()` 合并浏览器采样点，减少断裂。
+- 使用压力值影响线宽。
+- 当前笔画先画在 preview canvas，完成后提交到主 canvas。
+- 主 canvas 与 preview canvas 分离，减少全量重绘。
+- PDF Canvas context 使用 `{ desynchronized: true }` 降低输入到显示的延迟。
+- 橡皮擦使用笔画命中检测删除整条 stroke。
+- 框选使用矩形与 stroke 点相交检测。
+
+## 主要限制
+
+- PDF 还不是逐页语义模型，当前覆盖层按 iframe/stage 尺寸保存。
+- PDF 批注不会写回 PDF 文件。
+- Apple Pencil 双击侧面事件在 Web/Obsidian 环境中通常没有标准 PointerEvent 暴露；当前只能支持浏览器可识别的硬件橡皮按钮事件。
+- 上游复制代码许可限制阻止公开发布当前派生版本。
+
+## 构建
+
+```bash
+npm run build
+```
+
+构建入口是 `src/main.ts`，输出 `main.js` 和 `styles.css`。
+
+## 发布建议
+
+当前代码只能作为本地学习构建保存。要发布到 `Szturin/Obsidian-AnyNote`，应先取得上游授权，或完成 clean-room 重写后再推送公开仓库。
