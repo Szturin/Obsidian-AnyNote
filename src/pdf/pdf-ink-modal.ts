@@ -1,6 +1,7 @@
 import "./pdf-ink-modal.scss";
-import { App, Modal, Notice, Plugin, TFile, normalizePath, setIcon } from "obsidian";
+import { App, Modal, Notice, TFile, normalizePath, setIcon } from "obsidian";
 import { PDFDocument, PDFPage, rgb } from "pdf-lib";
+import type InkPlugin from "../main";
 
 type PdfInkTool = "pen" | "ballpoint" | "highlighter" | "eraser" | "select";
 
@@ -40,7 +41,7 @@ type PdfInkAction =
 	| { type: "remove"; strokes: Array<{ stroke: PdfInkStroke; index: number }> };
 
 export class PdfInkModal extends Modal {
-	private plugin: Plugin;
+	private plugin: InkPlugin;
 	private file: TFile;
 	private data: PdfInkData;
 	private canvas: HTMLCanvasElement;
@@ -63,7 +64,7 @@ export class PdfInkModal extends Modal {
 	private redoStack: PdfInkAction[] = [];
 	private abortController: AbortController | null = null;
 
-	constructor(app: App, plugin: Plugin, file: TFile) {
+	constructor(app: App, plugin: InkPlugin, file: TFile) {
 		super(app);
 		this.plugin = plugin;
 		this.file = file;
@@ -260,6 +261,7 @@ export class PdfInkModal extends Modal {
 	private finishTemporaryEraser() {
 		if (!this.temporaryEraserActive) return;
 		this.temporaryEraserActive = false;
+		if (!this.plugin.settings.autoSwitchToPenAfterErase) return;
 		this.tool = this.previousDrawingTool;
 	}
 

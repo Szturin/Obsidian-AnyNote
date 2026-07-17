@@ -146,6 +146,18 @@ function insertHighLevelSettings(containerEl: HTMLElement, plugin: InkPlugin, re
 			});
 		});
 
+	new Setting(containerEl)
+		.setClass('ddc_ink_setting')
+		.setName('擦除后自动切回画笔')
+		.setDesc('开启后，手写/绘图橡皮擦除完成会自动回到画笔；PDF 硬件临时橡皮结束后也会回到之前的笔。关闭后会保持当前橡皮状态。')
+		.addToggle((toggle) => {
+			toggle.setValue(plugin.settings.autoSwitchToPenAfterErase);
+			toggle.onChange(async (value) => {
+				plugin.settings.autoSwitchToPenAfterErase = value;
+				await plugin.saveSettings();
+			});
+		});
+
 }
 
 function insertSubfolderSettings(containerEl: HTMLElement, plugin: InkPlugin, refresh: Function) {

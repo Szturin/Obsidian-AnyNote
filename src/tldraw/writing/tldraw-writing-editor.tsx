@@ -149,7 +149,7 @@ export function TldrawWritingEditor(props: TldrawWritingEditorProps) {
 					break;
 					
 				case Activity.DrawingErased:
-					editor.setCurrentTool('draw');
+					if(props.plugin.settings.autoSwitchToPenAfterErase) editor.setCurrentTool('draw');
 					queueOrRunStorePostProcesses(editor);
 					break;
 					

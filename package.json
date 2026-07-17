@@ -1,6 +1,6 @@
 {
   "name": "obsidian-anynote",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Local-learning Obsidian ink workspace with Chinese UI, handwriting embeds, drawings, and PDF ink annotations.",
   "main": "main.js",

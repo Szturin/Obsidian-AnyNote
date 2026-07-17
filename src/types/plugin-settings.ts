@@ -14,6 +14,7 @@ export interface PluginSettings {
     notelessAttachmentFolderLocation: 'obsidian' | 'root',
 	writingSubfolder: string,
 	drawingSubfolder: string,
+	autoSwitchToPenAfterErase: boolean,
 	// Writing specific
 	writingEnabled: boolean,
 	writingStrokeLimit: number,
@@ -40,6 +41,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	notelessAttachmentFolderLocation: 'obsidian',
 	writingSubfolder: 'Ink/Writing',
 	drawingSubfolder: 'Ink/Drawing',
+	autoSwitchToPenAfterErase: true,
 	// Writing specific
 	writingEnabled: true,
 	writingStrokeLimit: 200,
