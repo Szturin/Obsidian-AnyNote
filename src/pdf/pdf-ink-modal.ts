@@ -1,5 +1,5 @@
 import "./pdf-ink-modal.scss";
-import { App, Modal, Notice, TFile, normalizePath, setIcon } from "obsidian";
+import { App, Notice, TFile, normalizePath, setIcon } from "obsidian";
 import { PDFDocument, PDFPage, rgb } from "pdf-lib";
 import type InkPlugin from "../main";
 
@@ -41,11 +41,14 @@ type PdfInkAction =
 	| { type: "add"; stroke: PdfInkStroke }
 	| { type: "remove"; strokes: Array<{ stroke: PdfInkStroke; index: number }> };
 
-export class PdfInkModal extends Modal {
+export class PdfInkOverlay {
 	private plugin: InkPlugin;
 	private file: TFile;
+	private host: HTMLElement;
 	private onClosed?: () => void;
 	private data: PdfInkData;
+	private root: HTMLElement;
+	private stage: HTMLElement;
 	private canvas: HTMLCanvasElement;
 	private previewCanvas: HTMLCanvasElement;
 	private predictionCanvas: HTMLCanvasElement;
@@ -65,34 +68,32 @@ export class PdfInkModal extends Modal {
 	private undoStack: PdfInkAction[] = [];
 	private redoStack: PdfInkAction[] = [];
 	private abortController: AbortController | null = null;
+	private resizeObserver: ResizeObserver | null = null;
+	private originalHostPosition = "";
+	private closed = false;
 
-	constructor(app: App, plugin: InkPlugin, file: TFile, onClosed?: () => void) {
-		super(app);
+	constructor(private app: App, plugin: InkPlugin, file: TFile, host: HTMLElement, onClosed?: () => void) {
 		this.plugin = plugin;
 		this.file = file;
+		this.host = host;
 		this.onClosed = onClosed;
 	}
 
-	async onOpen() {
+	async open() {
 		this.abortController = new AbortController();
-		this.modalEl.addClass("anynote-pdf-modal");
-		this.contentEl.empty();
-		this.contentEl.addClass("anynote-pdf-content");
 
-		const root = this.contentEl.createDiv({ cls: "anynote-pdf-root" });
-		const stage = root.createDiv({ cls: "anynote-pdf-stage" });
-		const resourceUrl = this.app.vault.getResourcePath(this.file);
-		stage.createEl("iframe", {
-			cls: "anynote-pdf-frame",
-			attr: { src: resourceUrl, title: this.file.basename }
-		});
+		this.originalHostPosition = this.host.style.position;
+		if (getComputedStyle(this.host).position === "static") this.host.style.position = "relative";
 
-		this.canvas = stage.createEl("canvas", { cls: "anynote-pdf-ink-canvas" });
-		this.previewCanvas = stage.createEl("canvas", { cls: "anynote-pdf-preview-canvas" });
-		this.predictionCanvas = stage.createEl("canvas", { cls: "anynote-pdf-prediction-canvas" });
-		this.selectionBox = stage.createDiv({ cls: "anynote-pdf-selection-box" });
-		const toolbar = this.createToolbar(root);
-		root.appendChild(toolbar);
+		this.root = this.host.createDiv({ cls: "anynote-pdf-overlay-root" });
+		this.stage = this.root.createDiv({ cls: "anynote-pdf-stage" });
+
+		this.canvas = this.stage.createEl("canvas", { cls: "anynote-pdf-ink-canvas" });
+		this.previewCanvas = this.stage.createEl("canvas", { cls: "anynote-pdf-preview-canvas" });
+		this.predictionCanvas = this.stage.createEl("canvas", { cls: "anynote-pdf-prediction-canvas" });
+		this.selectionBox = this.stage.createDiv({ cls: "anynote-pdf-selection-box" });
+		const toolbar = this.createToolbar(this.root);
+		this.root.appendChild(toolbar);
 
 		await nextFrame();
 		this.resizeCanvases();
@@ -101,10 +102,20 @@ export class PdfInkModal extends Modal {
 		this.installEvents();
 	}
 
-	onClose() {
+	isConnected() {
+		return Boolean(this.root?.isConnected);
+	}
+
+	close() {
+		if (this.closed) return;
+		this.closed = true;
 		if (this.data) void this.writeCache();
+		this.resizeObserver?.disconnect();
 		this.abortController?.abort();
-		this.contentEl.empty();
+		this.root?.remove();
+		this.host.removeClass("anynote-pdf-native-host");
+		if (this.host.style.position === "relative" && !this.originalHostPosition) this.host.style.position = "";
+		else this.host.style.position = this.originalHostPosition;
 		this.onClosed?.();
 	}
 
@@ -161,6 +172,11 @@ export class PdfInkModal extends Modal {
 			this.resizeCanvases();
 			this.renderAll();
 		}, { signal });
+		this.resizeObserver = new ResizeObserver(() => {
+			this.resizeCanvases();
+			this.renderAll();
+		});
+		this.resizeObserver.observe(this.stage);
 	}
 
 	private onPointerDown(event: PointerEvent) {
@@ -277,9 +293,17 @@ export class PdfInkModal extends Modal {
 			stroke.points.push(point);
 			return;
 		}
-		const minDistance = stroke.tool === "highlighter" ? 0.55 : 0.16;
-		if (distanceSquared(last, point) < minDistance * minDistance) return;
-		stroke.points.push(smoothPoint(last, point));
+		const mergeDistance = stroke.tool === "highlighter" ? 1.25 : 0.75;
+		const distance2 = distanceSquared(last, point);
+		const nextPoint = withVelocity(last, point);
+		if (distance2 < mergeDistance * mergeDistance) {
+			stroke.points[stroke.points.length - 1] = {
+				...nextPoint,
+				pressure: Math.max(last.pressure, nextPoint.pressure)
+			};
+			return;
+		}
+		stroke.points.push(nextPoint);
 	}
 
 	private renderCurrentStroke() {
@@ -469,7 +493,7 @@ export class PdfInkModal extends Modal {
 	}
 
 	private resizeCanvases() {
-		const rect = this.previewCanvas.getBoundingClientRect();
+		const rect = this.stage.getBoundingClientRect();
 		for (const canvas of [this.canvas, this.previewCanvas, this.predictionCanvas]) {
 			const dpr = Math.min(window.devicePixelRatio || 1, 2);
 			canvas.width = Math.max(1, Math.ceil(rect.width * dpr));
@@ -522,17 +546,12 @@ function isHardwareEraserEvent(event: PointerEvent): boolean {
 	return event.pointerType === "pen" && (event.button === 5 || (event.buttons & 32) === 32);
 }
 
-function smoothPoint(last: PdfInkPoint | undefined, point: PdfInkPoint): PdfInkPoint {
-	if (!last) return point;
+function withVelocity(last: PdfInkPoint, point: PdfInkPoint): PdfInkPoint {
 	const distance = Math.sqrt(distanceSquared(last, point));
 	const dt = Math.max(1, point.t - last.t);
 	const velocity = distance / dt;
-	const alpha = clamp(distance / 9, 0.46, 0.92);
 	return {
 		...point,
-		x: last.x + (point.x - last.x) * alpha,
-		y: last.y + (point.y - last.y) * alpha,
-		pressure: last.pressure + (point.pressure - last.pressure) * 0.72,
 		velocity: last.velocity === undefined ? velocity : last.velocity * 0.62 + velocity * 0.38
 	};
 }
@@ -571,51 +590,288 @@ function predictStroke(stroke: PdfInkStroke): PdfInkStroke | null {
 
 function renderStroke(context: CanvasRenderingContext2D, stroke: PdfInkStroke, alphaScale = 1) {
 	if (stroke.points.length === 0) return;
+	const options = getFreehandOptions(stroke, true);
+	const strokePoints = getFreehandStrokePoints(stroke.points, options);
+	setFreehandRadii(strokePoints, options);
+	const outline = getFreehandOutlinePoints(strokePoints, options);
 	context.save();
-	context.lineCap = "round";
-	context.lineJoin = "round";
-	context.strokeStyle = stroke.color;
 	context.fillStyle = stroke.color;
 	context.globalAlpha = (stroke.tool === "highlighter" ? 0.34 : 1) * alphaScale;
 	context.globalCompositeOperation = stroke.tool === "highlighter" ? "multiply" : "source-over";
-	if (stroke.points.length === 1) {
+	if (outline.length < 2) {
 		const point = stroke.points[0];
 		context.beginPath();
-		context.arc(point.x, point.y, stroke.width * point.pressure, 0, Math.PI * 2);
+		context.arc(point.x, point.y, Math.max(0.75, options.size / 2), 0, Math.PI * 2);
 		context.fill();
 		context.restore();
 		return;
 	}
-	if (stroke.points.length === 2) {
-		const a = stroke.points[0];
-		const b = stroke.points[1];
-		context.beginPath();
-		context.moveTo(a.x, a.y);
-		context.lineTo(b.x, b.y);
-		context.lineWidth = strokeWidthAt(stroke, b);
-		context.stroke();
-		context.restore();
+	fillSmoothPolygon(context, outline);
+	context.restore();
+}
+
+interface FreehandOptions {
+	size: number;
+	thinning: number;
+	streamline: number;
+	smoothing: number;
+	simulatePressure: boolean;
+	easing: (t: number) => number;
+	last: boolean;
+}
+
+interface FreehandStrokePoint {
+	point: PdfInkPoint;
+	input: PdfInkPoint;
+	pressure: number;
+	vector: PdfVector;
+	distance: number;
+	runningLength: number;
+	radius: number;
+}
+
+interface PdfVector {
+	x: number;
+	y: number;
+}
+
+function getFreehandOptions(stroke: PdfInkStroke, complete: boolean): FreehandOptions {
+	if (stroke.tool === "highlighter") {
+		return {
+			size: Math.max(1, stroke.width),
+			thinning: 0,
+			streamline: 0.5,
+			smoothing: 0.5,
+			simulatePressure: false,
+			easing: easeOutSine,
+			last: complete
+		};
+	}
+	if (stroke.tool === "ballpoint") {
+		return {
+			size: Math.max(0.75, stroke.width * 1.05),
+			thinning: 0,
+			streamline: 0.62,
+			smoothing: 0.62,
+			simulatePressure: false,
+			easing: linear,
+			last: complete
+		};
+	}
+	return {
+		size: Math.max(0.75, 1 + stroke.width * 1.2),
+		thinning: 0.62,
+		streamline: 0.62,
+		smoothing: 0.62,
+		simulatePressure: false,
+		easing: penEasing,
+		last: complete
+	};
+}
+
+function getFreehandStrokePoints(rawPoints: PdfInkPoint[], options: FreehandOptions): FreehandStrokePoint[] {
+	if (rawPoints.length === 0) return [];
+	const t = 0.15 + (1 - options.streamline) * 0.85;
+	const points = rawPoints
+		.map((point) => ({ ...point, pressure: clamp(point.pressure, 0.01, 1) }))
+		.filter((point, index, array) => {
+			if (options.simulatePressure) return true;
+			if (index === 0) return point.pressure >= 0.025 || array.length === 1;
+			if (index === array.length - 1) return point.pressure >= 0.01 || array.length === 1;
+			return true;
+		});
+	if (points.length === 0) return [];
+	const strokePoints: FreehandStrokePoint[] = [{
+		point: points[0],
+		input: points[0],
+		pressure: options.simulatePressure ? 0.5 : points[0].pressure,
+		vector: { x: 1, y: 1 },
+		distance: 0,
+		runningLength: 0,
+		radius: 1
+	}];
+	let totalLength = 0;
+	let previous = strokePoints[0];
+	for (let index = 1; index < points.length; index++) {
+		const input = points[index];
+		const point = options.last && index === points.length - 1 ? input : lerpPoint(input, previous.point, 1 - t);
+		if (distanceSquared(point, previous.point) < 0.0001) continue;
+		const distance = Math.sqrt(distanceSquared(point, previous.point));
+		totalLength += distance;
+		if (index < 4 && totalLength < options.size) continue;
+		const strokePoint: FreehandStrokePoint = {
+			input,
+			point,
+			pressure: options.simulatePressure ? 0.5 : input.pressure,
+			vector: unitVector(subtract(previous.point, point)),
+			distance,
+			runningLength: totalLength,
+			radius: 1
+		};
+		strokePoints.push(strokePoint);
+		previous = strokePoint;
+	}
+	if (strokePoints[1]) strokePoints[0].vector = { ...strokePoints[1].vector };
+	return strokePoints;
+}
+
+function setFreehandRadii(strokePoints: FreehandStrokePoint[], options: FreehandOptions) {
+	if (strokePoints.length === 0) return;
+	const rateOfPressureChange = 0.275;
+	const totalLength = strokePoints[strokePoints.length - 1].runningLength;
+	let previousPressure = strokePoints[0].pressure;
+	if (!options.simulatePressure && totalLength < options.size) {
+		const maxPressure = Math.max(0.5, ...strokePoints.map((point) => point.pressure));
+		for (const strokePoint of strokePoints) {
+			strokePoint.pressure = maxPressure;
+			strokePoint.radius = options.size * options.easing(0.5 - options.thinning * (0.5 - strokePoint.pressure));
+		}
 		return;
 	}
-	context.beginPath();
-	context.moveTo(stroke.points[0].x, stroke.points[0].y);
-	for (let index = 1; index < stroke.points.length - 1; index++) {
-		const control = stroke.points[index];
-		const next = stroke.points[index + 1];
-		const midX = (control.x + next.x) / 2;
-		const midY = (control.y + next.y) / 2;
-		context.lineWidth = strokeWidthAt(stroke, control);
-		context.quadraticCurveTo(control.x, control.y, midX, midY);
-		context.stroke();
-		context.beginPath();
-		context.moveTo(midX, midY);
+	for (const strokePoint of strokePoints) {
+		if (options.thinning) {
+			const sp = Math.min(1, strokePoint.distance / options.size);
+			const targetPressure = options.simulatePressure
+				? Math.min(1, 1 - sp)
+				: strokePoint.pressure;
+			const pressure = Math.min(1, previousPressure + (targetPressure - previousPressure) * (sp * rateOfPressureChange));
+			strokePoint.pressure = pressure;
+			strokePoint.radius = options.size * options.easing(0.5 - options.thinning * (0.5 - pressure));
+			previousPressure = pressure;
+		} else {
+			strokePoint.radius = options.size / 2;
+		}
 	}
-	const beforeLast = stroke.points[stroke.points.length - 2];
-	const last = stroke.points[stroke.points.length - 1];
-	context.lineWidth = strokeWidthAt(stroke, last);
-	context.quadraticCurveTo(beforeLast.x, beforeLast.y, last.x, last.y);
-	context.stroke();
-	context.restore();
+}
+
+function getFreehandOutlinePoints(strokePoints: FreehandStrokePoint[], options: FreehandOptions): PdfVector[] {
+	if (strokePoints.length === 0 || options.size <= 0) return [];
+	if (strokePoints.length === 1) return circlePoints(strokePoints[0].point, strokePoints[0].radius);
+	const left: PdfVector[] = [];
+	const right: PdfVector[] = [];
+	const minDistance = Math.pow(options.size * options.smoothing, 2);
+	let previousVector = strokePoints[0].vector;
+	let previousLeft: PdfVector = strokePoints[0].point;
+	let previousRight: PdfVector = strokePoints[0].point;
+	for (let index = 0; index < strokePoints.length; index++) {
+		const strokePoint = strokePoints[index];
+		const vector = strokePoint.vector;
+		const nextVector = index < strokePoints.length - 1 ? strokePoints[index + 1].vector : vector;
+		const nextDpr = dot(nextVector, vector);
+		const prevDpr = dot(vector, previousVector);
+		const sharpCorner = prevDpr < -0.15 || nextDpr < 0.2;
+		const offset = sharpCorner
+			? multiply(perpendicular(previousVector), strokePoint.radius)
+			: multiply(perpendicular(lerpVector(nextVector, vector, nextDpr)), strokePoint.radius);
+		const leftPoint = subtract(strokePoint.point, offset);
+		const rightPoint = add(strokePoint.point, offset);
+		if (index <= 1 || distanceSquared(previousLeft, leftPoint) > minDistance || sharpCorner) {
+			left.push(leftPoint);
+			previousLeft = leftPoint;
+		}
+		if (index <= 1 || distanceSquared(previousRight, rightPoint) > minDistance || sharpCorner) {
+			right.push(rightPoint);
+			previousRight = rightPoint;
+		}
+		previousVector = vector;
+	}
+	return [...left, ...roundCap(strokePoints[strokePoints.length - 1], false), ...right.reverse(), ...roundCap(strokePoints[0], true)];
+}
+
+function fillSmoothPolygon(context: CanvasRenderingContext2D, points: PdfVector[]) {
+	if (points.length < 2) return;
+	context.beginPath();
+	context.moveTo(points[0].x, points[0].y);
+	for (let index = 1; index < points.length - 1; index++) {
+		const current = points[index];
+		const next = points[index + 1];
+		context.quadraticCurveTo(current.x, current.y, (current.x + next.x) / 2, (current.y + next.y) / 2);
+	}
+	const last = points[points.length - 1];
+	context.lineTo(last.x, last.y);
+	context.closePath();
+	context.fill();
+}
+
+function easeOutSine(t: number) {
+	return Math.sin((t * Math.PI) / 2);
+}
+
+function linear(t: number) {
+	return t;
+}
+
+function penEasing(t: number) {
+	return Math.sin((t * Math.PI) / 2);
+}
+
+function lerpPoint(a: PdfInkPoint, b: PdfInkPoint, t: number): PdfInkPoint {
+	return {
+		x: a.x + (b.x - a.x) * t,
+		y: a.y + (b.y - a.y) * t,
+		t: a.t + (b.t - a.t) * t,
+		pressure: a.pressure + (b.pressure - a.pressure) * t,
+		velocity: a.velocity ?? b.velocity
+	};
+}
+
+function add(a: PdfVector, b: PdfVector): PdfVector {
+	return { x: a.x + b.x, y: a.y + b.y };
+}
+
+function subtract(a: PdfVector, b: PdfVector): PdfVector {
+	return { x: a.x - b.x, y: a.y - b.y };
+}
+
+function multiply(vector: PdfVector, scalar: number): PdfVector {
+	return { x: vector.x * scalar, y: vector.y * scalar };
+}
+
+function dot(a: PdfVector, b: PdfVector): number {
+	return a.x * b.x + a.y * b.y;
+}
+
+function perpendicular(vector: PdfVector): PdfVector {
+	return { x: vector.y, y: -vector.x };
+}
+
+function unitVector(vector: PdfVector): PdfVector {
+	const length = Math.sqrt(vector.x * vector.x + vector.y * vector.y);
+	if (length === 0) return { x: 1, y: 0 };
+	return { x: vector.x / length, y: vector.y / length };
+}
+
+function lerpVector(a: PdfVector, b: PdfVector, t: number): PdfVector {
+	return unitVector({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+}
+
+function circlePoints(center: PdfVector, radius: number): PdfVector[] {
+	const points: PdfVector[] = [];
+	const count = 12;
+	for (let index = 0; index < count; index++) {
+		const angle = (index / count) * Math.PI * 2;
+		points.push({
+			x: center.x + Math.cos(angle) * radius,
+			y: center.y + Math.sin(angle) * radius
+		});
+	}
+	return points;
+}
+
+function roundCap(strokePoint: FreehandStrokePoint, start: boolean): PdfVector[] {
+	const points: PdfVector[] = [];
+	const direction = start ? multiply(strokePoint.vector, -1) : strokePoint.vector;
+	const center = strokePoint.point;
+	const baseAngle = Math.atan2(direction.y, direction.x);
+	const steps = 8;
+	for (let index = 0; index <= steps; index++) {
+		const angle = baseAngle - Math.PI / 2 + (Math.PI * index) / steps;
+		points.push({
+			x: center.x + Math.cos(angle) * strokePoint.radius,
+			y: center.y + Math.sin(angle) * strokePoint.radius
+		});
+	}
+	return points;
 }
 
 function strokeWidthAt(stroke: PdfInkStroke, point: PdfInkPoint) {

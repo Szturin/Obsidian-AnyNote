@@ -20,7 +20,7 @@ import { atom, useSetAtom } from 'jotai';
 import { debug } from './utils/log-to-console';
 import { drawDefaultSvgStr, writeDefaultSvgStr, writeExistingSvgStr, writePasteSvgStr } from './graphics/icons/command-icons';
 import { drawExistingSvgStr, drawPasteSvgStr } from './graphics/icons/command-icons';
-import { PdfInkModal } from './pdf/pdf-ink-modal';
+import { PdfInkOverlay } from './pdf/pdf-ink-modal';
 
 ////////
 ////////
@@ -77,7 +77,9 @@ export default class InkPlugin extends Plugin {
 		showOnboardingTips_maybe(this);
 	}
 	
-	onunload() {}
+	onunload() {
+		closePdfAnnotations();
+	}
 
 	async loadSettings() {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
@@ -96,7 +98,7 @@ export default class InkPlugin extends Plugin {
 
 export const inkPluginAtom = atom<InkPlugin>();
 
-let openPdfAnnotationPath: string | null = null;
+const openPdfAnnotations = new Map<string, PdfInkOverlay>();
 
 function implementWritingEmbedActions(plugin: InkPlugin) {
 	plugin.addCommand({
@@ -179,18 +181,26 @@ function showOnboardingTips_maybe(plugin: InkPlugin) {
 }
 
 function implementPdfAnnotationActions(plugin: InkPlugin) {
-	const openPdfAnnotation = (file: TFile) => {
-		if (openPdfAnnotationPath === file.path) return;
-		openPdfAnnotationPath = file.path;
-		new PdfInkModal(plugin.app, plugin, file, () => {
-			if (openPdfAnnotationPath === file.path) openPdfAnnotationPath = null;
-		}).open();
+	const openPdfAnnotation = async (file: TFile) => {
+		const existing = openPdfAnnotations.get(file.path);
+		if (existing?.isConnected()) return;
+		existing?.close();
+		const host = await ensurePdfAnnotationHost(plugin, file);
+		if (!host) {
+			new Notice('未找到当前 PDF 视图，无法挂载手写工具栏');
+			return;
+		}
+		const overlay = new PdfInkOverlay(plugin.app, plugin, file, host, () => {
+			openPdfAnnotations.delete(file.path);
+		});
+		openPdfAnnotations.set(file.path, overlay);
+		await overlay.open();
 	};
 
 	plugin.addRibbonIcon('pen-line', 'PDF 手写批注', () => {
 		const file = plugin.app.workspace.getActiveFile();
 		if (file instanceof TFile && file.extension.toLowerCase() === 'pdf') {
-			openPdfAnnotation(file);
+			void openPdfAnnotation(file);
 		} else {
 			new Notice('请先打开一个 PDF 文件');
 		}
@@ -203,7 +213,7 @@ function implementPdfAnnotationActions(plugin: InkPlugin) {
 			const file = plugin.app.workspace.getActiveFile();
 			const canAnnotate = file instanceof TFile && file.extension.toLowerCase() === 'pdf';
 			if (canAnnotate && !checking) {
-				openPdfAnnotation(file);
+				void openPdfAnnotation(file);
 			}
 			return canAnnotate;
 		}
@@ -216,7 +226,7 @@ function implementPdfAnnotationActions(plugin: InkPlugin) {
 					item
 						.setTitle('PDF 手写批注')
 						.setIcon('pen-line')
-						.onClick(() => openPdfAnnotation(file));
+						.onClick(() => void openPdfAnnotation(file));
 				});
 			}
 		})
@@ -226,7 +236,7 @@ function implementPdfAnnotationActions(plugin: InkPlugin) {
 		plugin.app.workspace.on('file-open', (file) => {
 			if (!plugin.settings.autoOpenPdfAnnotation) return;
 			if (file instanceof TFile && file.extension.toLowerCase() === 'pdf') {
-				window.setTimeout(() => openPdfAnnotation(file), 80);
+				window.setTimeout(() => void openPdfAnnotation(file), 80);
 			}
 		})
 	);
@@ -235,7 +245,54 @@ function implementPdfAnnotationActions(plugin: InkPlugin) {
 		if (!plugin.settings.autoOpenPdfAnnotation) return;
 		const file = plugin.app.workspace.getActiveFile();
 		if (file instanceof TFile && file.extension.toLowerCase() === 'pdf') {
-			window.setTimeout(() => openPdfAnnotation(file), 120);
+			window.setTimeout(() => void openPdfAnnotation(file), 120);
 		}
 	});
+}
+
+function closePdfAnnotations() {
+	for (const overlay of openPdfAnnotations.values()) overlay.close();
+	openPdfAnnotations.clear();
+}
+
+async function ensurePdfAnnotationHost(plugin: InkPlugin, file: TFile): Promise<HTMLElement | null> {
+	const activeFile = plugin.app.workspace.getActiveFile();
+	if (!(activeFile instanceof TFile) || activeFile.path !== file.path) {
+		await plugin.app.workspace.getLeaf(false).openFile(file);
+		await waitForPdfView();
+	}
+	return findPdfAnnotationHost(plugin, file);
+}
+
+function findPdfAnnotationHost(plugin: InkPlugin, file: TFile): HTMLElement | null {
+	const leaves = [
+		...(plugin.app.workspace.getLeavesOfType('pdf') || []),
+		...((plugin.app.workspace as any).getLeavesOfType?.('markdown') || [])
+	];
+	const activeLeaf = (plugin.app.workspace as any).activeLeaf;
+	const orderedLeaves = activeLeaf ? [activeLeaf, ...leaves.filter((leaf) => leaf !== activeLeaf)] : leaves;
+
+	for (const leaf of orderedLeaves) {
+		const view = (leaf as any)?.view;
+		const viewFile = view?.file;
+		if (!(viewFile instanceof TFile) || viewFile.path !== file.path) continue;
+		const container = view.containerEl as HTMLElement | undefined;
+		const content = container?.querySelector<HTMLElement>('.view-content') || container;
+		if (!content) continue;
+		content.addClass('anynote-pdf-native-host');
+		return content;
+	}
+
+	const activeView = (activeLeaf as any)?.view;
+	const activeContainer = activeView?.containerEl as HTMLElement | undefined;
+	const activeContent = activeContainer?.querySelector<HTMLElement>('.view-content') || activeContainer;
+	if (activeContent && plugin.app.workspace.getActiveFile()?.path === file.path) {
+		activeContent.addClass('anynote-pdf-native-host');
+		return activeContent;
+	}
+	return null;
+}
+
+function waitForPdfView(): Promise<void> {
+	return new Promise((resolve) => window.setTimeout(resolve, 120));
 }
