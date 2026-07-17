@@ -5,7 +5,7 @@
 - 插件 id：`obsidian-anynote`
 - 插件名：`Obsidian AnyNote`
 - npm 包名：`obsidian-anynote`
-- 当前版本：`0.2.6`
+- 当前版本：`0.2.7`
 - 目标 GitHub 仓库：`Szturin/Obsidian-AnyNote`
 
 ## 必须遵守的许可边界
@@ -54,13 +54,15 @@ PDF 批注是原生 PDF 视图内的页级 JSON 批注：
 - 每条 stroke 必须绑定 `pageNumber`、`pageWidth`、`pageHeight` 和页内坐标。
 - 用户点击 `导出带批注 PDF` 时，会额外生成新的 `*.anynote.pdf`，并按页码以矢量线段写入当前批注。
 - 工具栏直接挂载在 Obsidian 当前 PDF leaf 的 `.view-content` 内，不再创建 modal、iframe 或独立窗口。
-- 书写 stage 必须跟随真实 PDF 页面元素，不允许覆盖 PDF 顶部控件、左侧缩略图目录或右侧面板。
+- 书写 stage 必须直接插入真实 PDF page DOM 内部，不允许用外层 `.view-content` 坐标追踪页面。
+- 书写 stage 不允许覆盖 PDF 顶部控件、左侧缩略图目录或右侧面板。
+- Apple Pencil 输入需要保留压力下限、采样补点和短暂断流续接，避免虚线/断线。
 - 工具栏包含“手/浏览”模式；该模式会让底层 PDF 接收拖动和滚动事件。
 - 当前工具按钮必须有 `is-active`/`aria-pressed` 选中状态。
 
 ## BRAT 发布准备
 
-`.github/workflows/release.yml` 会在推送版本标签时构建并上传 BRAT 需要的 release assets。优先使用与 `manifest.json` 版本一致的标签，例如 `0.2.6`。
+`.github/workflows/release.yml` 会在推送版本标签时构建并上传 BRAT 需要的 release assets。优先使用与 `manifest.json` 版本一致的标签，例如 `0.2.7`。
 
 - `main.js`
 - `manifest.json`

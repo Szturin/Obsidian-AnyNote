@@ -76,6 +76,10 @@ export class PdfInkOverlay {
 	private originalHostPosition = "";
 	private closed = false;
 	private lastStageRect: PdfInkRect | null = null;
+	private lastFinishedStroke: { stroke: PdfInkStroke; index: number; finishedAt: number; pointerType: string } | null = null;
+	private stageHost: HTMLElement | null = null;
+	private originalStageHostPosition = "";
+	private stageHostPositionChanged = false;
 
 	constructor(private app: App, plugin: InkPlugin, file: TFile, host: HTMLElement, onClosed?: () => void) {
 		this.plugin = plugin;
@@ -91,7 +95,8 @@ export class PdfInkOverlay {
 		if (getComputedStyle(this.host).position === "static") this.host.style.position = "relative";
 
 		this.root = this.host.createDiv({ cls: "anynote-pdf-overlay-root" });
-		this.stage = this.root.createDiv({ cls: "anynote-pdf-stage" });
+		this.stage = document.createElement("div");
+		this.stage.addClass("anynote-pdf-stage");
 
 		this.canvas = this.stage.createEl("canvas", { cls: "anynote-pdf-ink-canvas" });
 		this.previewCanvas = this.stage.createEl("canvas", { cls: "anynote-pdf-preview-canvas" });
@@ -119,7 +124,9 @@ export class PdfInkOverlay {
 		if (this.data) void this.writeCache();
 		this.resizeObserver?.disconnect();
 		this.abortController?.abort();
+		this.stage?.remove();
 		this.root?.remove();
+		this.restoreStageHostPosition();
 		this.host.removeClass("anynote-pdf-native-host");
 		if (this.host.style.position === "relative" && !this.originalHostPosition) this.host.style.position = "";
 		else this.host.style.position = this.originalHostPosition;
@@ -221,14 +228,15 @@ export class PdfInkOverlay {
 			return;
 		}
 
-		this.currentStroke = {
+		const stitchedStroke = this.tryResumeRecentPencilStroke(activeTool, point, event);
+		this.currentStroke = stitchedStroke || {
 			id: crypto.randomUUID(),
 			tool: activeTool,
 			color: activeTool === "highlighter" ? this.highlighterColor : this.color,
 			width: activeTool === "highlighter" ? this.highlighterWidth : this.width,
 			pageNumber: this.currentPageNumber(),
-			pageWidth: Math.max(1, this.canvas.clientWidth),
-			pageHeight: Math.max(1, this.canvas.clientHeight),
+			pageWidth: this.currentStageWidth(),
+			pageHeight: this.currentStageHeight(),
 			points: [point]
 		};
 		this.renderCurrentStroke();
@@ -272,6 +280,12 @@ export class PdfInkOverlay {
 			const stroke = cloneStroke(this.currentStroke);
 			this.data.strokes.push(stroke);
 			this.undoStack.push({ type: "add", stroke });
+			this.lastFinishedStroke = {
+				stroke: cloneStroke(stroke),
+				index: this.data.strokes.length - 1,
+				finishedAt: performance.now(),
+				pointerType: event.pointerType
+			};
 			this.redoStack = [];
 			this.currentStroke = null;
 			this.clearCanvas(this.previewCanvas);
@@ -343,6 +357,20 @@ export class PdfInkOverlay {
 			};
 			return;
 		}
+		const distance = Math.sqrt(distance2);
+		const maxSpacing = stroke.tool === "highlighter"
+			? Math.max(3, stroke.width * 0.28)
+			: Math.max(2.2, stroke.width * 1.25);
+		if (distance > maxSpacing) {
+			const steps = Math.min(24, Math.floor(distance / maxSpacing));
+			let previous = last;
+			for (let index = 1; index <= steps; index++) {
+				const interpolated = interpolateInkPoint(last, nextPoint, index / (steps + 1));
+				const withInterpolatedVelocity = withVelocity(previous, interpolated);
+				stroke.points.push(withInterpolatedVelocity);
+				previous = withInterpolatedVelocity;
+			}
+		}
 		stroke.points.push(nextPoint);
 	}
 
@@ -384,6 +412,33 @@ export class PdfInkOverlay {
 		this.renderAll();
 	}
 
+	private tryResumeRecentPencilStroke(
+		tool: PdfInkTool,
+		point: PdfInkPoint,
+		event: PointerEvent
+	): PdfInkStroke | null {
+		if (event.pointerType !== "pen" || !(tool === "pen" || tool === "ballpoint" || tool === "highlighter")) return null;
+		const last = this.lastFinishedStroke;
+		if (!last || last.pointerType !== "pen") return null;
+		if (performance.now() - last.finishedAt > 240) return null;
+		const stroke = last.stroke;
+		const lastPoint = stroke.points[stroke.points.length - 1];
+		if (!lastPoint) return null;
+		const sameTool = stroke.tool === tool;
+		const samePage = stroke.pageNumber === this.currentPageNumber();
+		const sameSize = Math.abs(stroke.width - (tool === "highlighter" ? this.highlighterWidth : this.width)) < 0.75;
+		const sameColor = stroke.color === (tool === "highlighter" ? this.highlighterColor : this.color);
+		const maxGap = Math.max(26, stroke.width * 3.5);
+		if (!sameTool || !samePage || !sameSize || !sameColor || distanceSquared(lastPoint, point) > maxGap * maxGap) return null;
+
+		const currentIndex = this.data.strokes.findIndex((item) => item.id === stroke.id);
+		if (currentIndex >= 0) this.data.strokes.splice(currentIndex, 1);
+		const previousAction = this.undoStack[this.undoStack.length - 1];
+		if (previousAction?.type === "add" && previousAction.stroke.id === stroke.id) this.undoStack.pop();
+		this.lastFinishedStroke = null;
+		return cloneStroke(stroke);
+	}
+
 	private deleteSelected() {
 		if (this.selectedStrokeIds.size === 0) return;
 		const removed: Array<{ stroke: PdfInkStroke; index: number }> = [];
@@ -400,7 +455,7 @@ export class PdfInkOverlay {
 	}
 
 	private currentPageNumber() {
-		return getPageNumber(this.findInkTarget()) || 1;
+		return getPageNumber(this.stageHost) || getPageNumber(this.findInkTarget()) || 1;
 	}
 
 	private currentPageStrokes() {
@@ -409,10 +464,10 @@ export class PdfInkOverlay {
 	}
 
 	private strokeForCurrentStage(stroke: PdfInkStroke): PdfInkStroke {
-		const sourceWidth = Math.max(1, stroke.pageWidth || this.data?.width || this.canvas.clientWidth);
-		const sourceHeight = Math.max(1, stroke.pageHeight || this.data?.height || this.canvas.clientHeight);
-		const targetWidth = Math.max(1, this.canvas.clientWidth);
-		const targetHeight = Math.max(1, this.canvas.clientHeight);
+		const sourceWidth = Math.max(1, stroke.pageWidth || this.data?.width || this.currentStageWidth());
+		const sourceHeight = Math.max(1, stroke.pageHeight || this.data?.height || this.currentStageHeight());
+		const targetWidth = this.currentStageWidth();
+		const targetHeight = this.currentStageHeight();
 		if (Math.abs(sourceWidth - targetWidth) < 0.5 && Math.abs(sourceHeight - targetHeight) < 0.5) return stroke;
 		const scaleX = targetWidth / sourceWidth;
 		const scaleY = targetHeight / sourceHeight;
@@ -427,6 +482,14 @@ export class PdfInkOverlay {
 				y: point.y * scaleY
 			}))
 		};
+	}
+
+	private currentStageWidth() {
+		return Math.max(1, this.lastStageRect?.width || this.stage?.getBoundingClientRect().width || this.canvas?.clientWidth || 1);
+	}
+
+	private currentStageHeight() {
+		return Math.max(1, this.lastStageRect?.height || this.stage?.getBoundingClientRect().height || this.canvas?.clientHeight || 1);
 	}
 
 	private undo() {
@@ -583,23 +646,42 @@ export class PdfInkOverlay {
 	}
 
 	private syncStageToInkTarget(): PdfInkRect {
-		const hostRect = this.host.getBoundingClientRect();
-		const targetRect = this.findInkTarget()?.getBoundingClientRect();
-		const rect = targetRect ? rectRelativeToHost(targetRect, hostRect) : fallbackInkRect(hostRect);
+		const target = this.pointerId === null ? this.findInkTarget() : this.stageHost || this.findInkTarget();
+		if (target) this.attachStageToPage(target);
+		else if (!this.stage.isConnected) this.root.appendChild(this.stage);
+
+		const stageRect = this.stage.getBoundingClientRect();
+		const fallback = fallbackInkRect(this.host.getBoundingClientRect());
 		const nextRect = {
-			x: Math.max(0, rect.x),
-			y: Math.max(0, rect.y),
-			width: Math.max(1, Math.min(rect.width, hostRect.width - Math.max(0, rect.x))),
-			height: Math.max(1, Math.min(rect.height, hostRect.height - Math.max(0, rect.y)))
+			x: 0,
+			y: 0,
+			width: Math.max(1, stageRect.width || fallback.width),
+			height: Math.max(1, stageRect.height || fallback.height)
 		};
-		if (!sameRect(this.lastStageRect, nextRect)) {
-			this.stage.style.left = `${nextRect.x}px`;
-			this.stage.style.top = `${nextRect.y}px`;
-			this.stage.style.width = `${nextRect.width}px`;
-			this.stage.style.height = `${nextRect.height}px`;
-			this.lastStageRect = nextRect;
-		}
+		this.lastStageRect = nextRect;
 		return nextRect;
+	}
+
+	private attachStageToPage(page: HTMLElement) {
+		if (this.stageHost === page && this.stage.parentElement === page) return;
+		this.restoreStageHostPosition();
+		this.stageHost = page;
+		this.originalStageHostPosition = page.style.position;
+		this.stageHostPositionChanged = getComputedStyle(page).position === "static";
+		if (this.stageHostPositionChanged) page.style.position = "relative";
+		page.addClass("anynote-pdf-page-host");
+		page.appendChild(this.stage);
+		if (this.resizeObserver) this.resizeObserver.observe(page);
+	}
+
+	private restoreStageHostPosition() {
+		if (!this.stageHost) return;
+		if (this.resizeObserver) this.resizeObserver.unobserve(this.stageHost);
+		this.stageHost.removeClass("anynote-pdf-page-host");
+		if (this.stageHostPositionChanged) this.stageHost.style.position = this.originalStageHostPosition;
+		this.stageHost = null;
+		this.originalStageHostPosition = "";
+		this.stageHostPositionChanged = false;
 	}
 
 	private findInkTarget(): HTMLElement | null {
@@ -648,7 +730,7 @@ export class PdfInkOverlay {
 			x: event.clientX - rect.left,
 			y: event.clientY - rect.top,
 			t: event.timeStamp || performance.now(),
-			pressure: Math.max(0.05, Math.min(1, event.pressure || 0.5))
+			pressure: normalizePointerPressure(event)
 		};
 	}
 
@@ -692,6 +774,24 @@ function withVelocity(last: PdfInkPoint, point: PdfInkPoint): PdfInkPoint {
 	return {
 		...point,
 		velocity: last.velocity === undefined ? velocity : last.velocity * 0.62 + velocity * 0.38
+	};
+}
+
+function normalizePointerPressure(event: PointerEvent): number {
+	const rawPressure = Number.isFinite(event.pressure) && event.pressure > 0 ? event.pressure : 0.5;
+	const minPressure = event.pointerType === "pen" ? 0.24 : 0.05;
+	return clamp(rawPressure, minPressure, 1);
+}
+
+function interpolateInkPoint(a: PdfInkPoint, b: PdfInkPoint, t: number): PdfInkPoint {
+	return {
+		x: a.x + (b.x - a.x) * t,
+		y: a.y + (b.y - a.y) * t,
+		t: a.t + (b.t - a.t) * t,
+		pressure: a.pressure + (b.pressure - a.pressure) * t,
+		velocity: a.velocity !== undefined && b.velocity !== undefined
+			? a.velocity + (b.velocity - a.velocity) * t
+			: a.velocity ?? b.velocity
 	};
 }
 
@@ -837,7 +937,7 @@ function getFreehandStrokePoints(rawPoints: PdfInkPoint[], options: FreehandOpti
 		if (distanceSquared(point, previous.point) < 0.0001) continue;
 		const distance = Math.sqrt(distanceSquared(point, previous.point));
 		totalLength += distance;
-		if (index < 4 && totalLength < options.size) continue;
+		if (index < 4 && totalLength < options.size && index !== points.length - 1) continue;
 		const strokePoint: FreehandStrokePoint = {
 			input,
 			point,
