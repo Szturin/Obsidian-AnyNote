@@ -1,5 +1,5 @@
 import "./pdf-ink-modal.scss";
-import { App, Notice, TFile, normalizePath, setIcon } from "obsidian";
+import { App, Notice, Platform, TFile, normalizePath, setIcon } from "obsidian";
 import { PDFDocument, PDFPage, rgb } from "pdf-lib";
 import type InkPlugin from "../main";
 
@@ -95,6 +95,9 @@ export class PdfInkOverlay {
 		if (getComputedStyle(this.host).position === "static") this.host.style.position = "relative";
 
 		this.root = this.host.createDiv({ cls: "anynote-pdf-overlay-root" });
+		if (Platform.isMobile || window.matchMedia("(pointer: coarse)").matches) {
+			this.root.addClass("is-mobile-toolbar");
+		}
 		this.stage = document.createElement("div");
 		this.stage.addClass("anynote-pdf-stage");
 

@@ -7087,6 +7087,13 @@
   overflow: hidden;
   pointer-events: none;
 }
+.anynote-pdf-overlay-root.is-mobile-toolbar {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  overflow: visible;
+  pointer-events: none;
+}
 .anynote-pdf-stage {
   position: absolute;
   inset: 0;
@@ -7157,6 +7164,18 @@
   overflow-x: auto;
   pointer-events: auto;
 }
+.anynote-pdf-overlay-root.is-mobile-toolbar .anynote-pdf-toolbar {
+  position: fixed;
+  left: 50vw;
+  right: auto;
+  bottom: max(12px, env(safe-area-inset-bottom));
+  z-index: 2147483001;
+  max-width: calc(100vw - 16px);
+  padding: 8px;
+  border-color: rgba(127, 127, 127, 0.35);
+  background: color-mix(in srgb, var(--background-primary, #ffffff) 96%, transparent);
+  box-shadow: 0 12px 38px rgba(0, 0, 0, 0.28);
+}
 .anynote-toolbar-group {
   display: inline-flex;
   align-items: center;
@@ -7183,6 +7202,14 @@
   box-shadow: inset 0 0 0 1px var(--background-modifier-border);
   cursor: pointer;
 }
+.anynote-pdf-overlay-root.is-mobile-toolbar .anynote-icon-button {
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  background: var(--background-secondary, #f2f2f2);
+  color: var(--text-normal, #222222);
+}
 .anynote-icon-button:hover {
   background: var(--background-modifier-hover);
   color: var(--text-normal);
@@ -7197,6 +7224,10 @@
   width: 18px;
   height: 18px;
 }
+.anynote-pdf-overlay-root.is-mobile-toolbar .anynote-icon-button svg {
+  width: 21px;
+  height: 21px;
+}
 .anynote-color {
   width: 34px;
   height: 34px;
@@ -7208,4 +7239,22 @@
 .anynote-width {
   width: 118px;
   accent-color: var(--interactive-accent);
+}
+.anynote-pdf-overlay-root.is-mobile-toolbar .anynote-width {
+  width: min(132px, 28vw);
+}
+@media (pointer: coarse), (max-width: 800px) {
+  .anynote-pdf-overlay-root {
+    position: fixed;
+    inset: 0;
+    z-index: 2147483000;
+    overflow: visible;
+  }
+  .anynote-pdf-toolbar {
+    position: fixed;
+    left: 50vw;
+    bottom: max(12px, env(safe-area-inset-bottom));
+    z-index: 2147483001;
+    max-width: calc(100vw - 16px);
+  }
 }

@@ -5,7 +5,7 @@
 - 插件 id：`obsidian-anynote`
 - 插件名：`Obsidian AnyNote`
 - npm 包名：`obsidian-anynote`
-- 当前版本：`0.2.7`
+- 当前版本：`0.2.8`
 - 目标 GitHub 仓库：`Szturin/Obsidian-AnyNote`
 
 ## 必须遵守的许可边界
@@ -59,10 +59,11 @@ PDF 批注是原生 PDF 视图内的页级 JSON 批注：
 - Apple Pencil 输入需要保留压力下限、采样补点和短暂断流续接，避免虚线/断线。
 - 工具栏包含“手/浏览”模式；该模式会让底层 PDF 接收拖动和滚动事件。
 - 当前工具按钮必须有 `is-active`/`aria-pressed` 选中状态。
+- 移动端/iPad 工具栏必须使用 viewport fixed fallback，不要依赖 PDF 滚动容器内的 absolute bottom。
 
 ## BRAT 发布准备
 
-`.github/workflows/release.yml` 会在推送版本标签时构建并上传 BRAT 需要的 release assets。优先使用与 `manifest.json` 版本一致的标签，例如 `0.2.7`。
+`.github/workflows/release.yml` 会在推送版本标签时构建并上传 BRAT 需要的 release assets。优先使用与 `manifest.json` 版本一致的标签，例如 `0.2.8`。
 
 - `main.js`
 - `manifest.json`
