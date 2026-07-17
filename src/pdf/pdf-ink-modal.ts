@@ -401,19 +401,24 @@ export class PdfInkOverlay {
 
 	private onPointerEnd(event: PointerEvent) {
 		if (this.pointerId !== event.pointerId) return;
+		if ((event.timeStamp || performance.now()) < this.pointerStartedAt - 1) return;
 		event.preventDefault();
 		this.finishActivePointer(event);
 	}
 
 	private onPointerLost(event: PointerEvent) {
 		if (this.pointerId !== event.pointerId) return;
+		if ((event.timeStamp || performance.now()) < this.pointerStartedAt - 1) return;
 		this.finishActivePointer(event);
 	}
 
 	private recoverInterruptedPointer(event: PointerEvent) {
 		const now = event.timeStamp || performance.now();
-		if (event.pointerId === this.pointerId) return;
-		if (now - this.lastPointerEventAt < 24 && now - this.pointerStartedAt < 60) return;
+		const samePointer = event.pointerId === this.pointerId;
+		const samePointerPenDown = samePointer && event.type === "pointerdown" && event.pointerType === "pen";
+		if (samePointer && !samePointerPenDown) return;
+		if (!samePointerPenDown && now - this.lastPointerEventAt < 24 && now - this.pointerStartedAt < 60) return;
+		if (samePointerPenDown && now - this.lastPointerEventAt < 8 && now - this.pointerStartedAt < 24) return;
 		this.finishActivePointer(event);
 	}
 

@@ -5,7 +5,7 @@
 - 插件 id：`obsidian-anynote`
 - 插件名：`Obsidian AnyNote`
 - npm 包名：`obsidian-anynote`
-- 当前版本：`0.2.15`
+- 当前版本：`0.2.16`
 - 目标 GitHub 仓库：`Szturin/Obsidian-AnyNote`
 
 ## 必须遵守的许可边界
@@ -68,11 +68,12 @@ PDF 批注是原生 PDF 视图内的页级 JSON 批注：
 - PDF 缩放关键路径：不要在 resize/zoom 高频阶段直接修改 committed canvas 的 `width`/`height`，这会立刻清空笔迹。保留旧 bitmap 跟随 CSS 缩放，等防抖后离屏重绘再提交。
 - PDF 实时书写关键路径：pointermove 不要跑完整 tldraw/freehand 几何；当前笔画用轻量 live stroke，抬笔后才生成高质量 committed stroke。
 - PDF 快速连笔关键路径：不要只依赖 canvas 本身的 `pointerup`；保留 window 级 pointer end、`lostpointercapture`、stale pointer 恢复和续接前页级重绘，避免 iPad Pencil 快速书写时下一笔被 `pointerId` 锁吞掉或重复旧笔画。
+- iPad Pencil 快速落笔关键路径：WebKit 可能复用同一个 `pointerId`，且上一笔 `pointerup` 可能延迟/丢失。新的 pen `pointerdown` 即使 pointerId 相同，也必须能强制收尾上一笔并立即开始新笔。
 - PDF 页级引擎关键路径：每个可见 PDF page 必须拥有自己的 `anynote-pdf-page-stage`、committed/live/prediction canvas、render signature 和 dirty-page 生命周期。不要恢复成单个全局 stage 在页面间移动。
 
 ## BRAT 发布准备
 
-`.github/workflows/release.yml` 会在推送版本标签时构建并上传 BRAT 需要的 release assets。优先使用与 `manifest.json` 版本一致的标签，例如 `0.2.15`。
+`.github/workflows/release.yml` 会在推送版本标签时构建并上传 BRAT 需要的 release assets。优先使用与 `manifest.json` 版本一致的标签，例如 `0.2.16`。
 
 - `main.js`
 - `manifest.json`
@@ -87,7 +88,7 @@ PDF 批注是原生 PDF 视图内的页级 JSON 批注：
 
 - 增加笔画预测层。
 - PDF 笔迹已经切到 tldraw/freehand 同构算法；后续重点是 iPad Pencil 实机采样、预测和大批量 stroke 性能。
-- 为橡皮/框选增加空间索引；当前 0.2.15 已完成页级 dirty 渲染、抬笔增量提交、PDF 初始化失败恢复、缩放离屏提交、视口页虚拟化和轻量实时笔迹。
+- 为橡皮/框选增加空间索引；当前 0.2.16 已完成页级 dirty 渲染、抬笔增量提交、PDF 初始化失败恢复、缩放离屏提交、视口页虚拟化、轻量实时笔迹和 iPad 同 pointerId 快速落笔恢复。
 - 将页级 JSON 批注升级为更接近 PDF 原生 annotation object 的模型。
 - 避免每次输入都全量重绘。
 
