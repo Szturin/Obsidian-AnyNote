@@ -41,3 +41,11 @@ The direction is to keep the native PDF surface while adopting mobile-ink's page
 - Erase, selection, undo, redo, and delete now invalidate only affected pages through a dirty-page queue.
 - Rejoining a rapid Apple Pencil stroke rebuilds the affected page before replaying the resumed live stroke, preventing duplicated committed ink.
 - Existing page-level render signatures, Path2D caches, and deferred zoom redraws remain in place.
+
+## Applied Performance Changes In AnyNote 0.2.15
+
+- Ink canvases are virtualized to pages near the viewport instead of every PDF page in the DOM.
+- High zoom rendering is capped by a canvas pixel budget, preventing huge backing stores from overwhelming CPU/GPU.
+- Committed ink canvases are not cleared at the beginning of zoom. They keep the previous bitmap until the new page render is complete.
+- Page rebuilds draw into an offscreen buffer first, then commit to the visible canvas in one step.
+- Live handwriting uses a lightweight stroke renderer during pointer movement; tldraw/freehand quality rendering is deferred to the committed stroke.

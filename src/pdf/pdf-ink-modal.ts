@@ -80,6 +80,10 @@ interface PdfStrokeRenderCache {
 	options: StrokeOptions;
 }
 
+const MAX_PDF_CANVAS_PIXELS_DESKTOP = 3_200_000;
+const MAX_PDF_CANVAS_PIXELS_MOBILE = 1_800_000;
+const PAGE_VIRTUALIZATION_MARGIN = 1.2;
+
 export class PdfInkOverlay {
 	private plugin: InkPlugin;
 	private file: TFile;
@@ -301,7 +305,7 @@ export class PdfInkOverlay {
 		this.host.addEventListener("scroll", () => {
 			const previousStageHost = this.stageHost;
 			this.syncStageToInkTarget();
-			if (previousStageHost !== this.stageHost) this.resizeCanvases();
+			if (previousStageHost !== this.stageHost) this.resizeCanvases(false);
 			this.scheduleRenderAll();
 		}, { signal, capture: true });
 		this.resizeObserver = new ResizeObserver(() => {
@@ -317,7 +321,7 @@ export class PdfInkOverlay {
 		const page = this.findPageAtPoint(event.clientX, event.clientY);
 		if (!page) return;
 		this.activatePageLayer(page);
-		this.resizeCanvases();
+		this.resizeCanvases(false);
 		this.scheduleRenderAll();
 		this.onPointerDown(event);
 	}
@@ -439,9 +443,9 @@ export class PdfInkOverlay {
 		};
 		this.redoStack = [];
 		this.currentStroke = null;
+		this.commitStrokeToVisibleLayer(stroke);
 		this.clearCanvas(this.previewCanvas);
 		this.clearCanvas(this.predictionCanvas);
-		this.commitStrokeToVisibleLayer(stroke);
 	}
 
 	private setTool(tool: PdfInkTool) {
@@ -527,7 +531,7 @@ export class PdfInkOverlay {
 		this.clearCanvas(this.previewCanvas);
 		if (!this.currentStroke) return;
 		const context = this.context(this.previewCanvas);
-		renderStroke(context, this.currentStroke);
+		renderLiveStroke(context, this.currentStroke);
 	}
 
 	private renderPrediction() {
@@ -537,7 +541,7 @@ export class PdfInkOverlay {
 		const predicted = predictStroke(this.currentStroke);
 		if (!predicted) return;
 		const context = this.context(this.predictionCanvas);
-		renderStroke(context, predicted, 0.32);
+		renderLiveStroke(context, predicted, 0.32);
 	}
 
 	private renderAll() {
@@ -588,28 +592,29 @@ export class PdfInkOverlay {
 	private scheduleDeferredResizeRender() {
 		this.syncStageToInkTarget();
 		if (this.pointerId !== null) {
-			this.resizeCanvases();
-			this.scheduleRenderAll();
+			this.resizeCanvases(false);
+			this.scheduleRenderPages([this.currentPageNumber()]);
 			return;
 		}
 		if (this.resizeRenderTimer !== null) window.clearTimeout(this.resizeRenderTimer);
 		this.resizeRenderTimer = window.setTimeout(() => {
 			this.resizeRenderTimer = null;
-			this.resizeCanvases();
+			this.resizeCanvases(false);
 			this.scheduleRenderAll();
-		}, 90);
+		}, 180);
 	}
 
 	private renderPageInkLayers(strokesByPage: Map<number, PdfInkStroke[]>) {
 		if (!this.data) return;
-		const visiblePages = this.findPageTargets();
+		const hostRect = this.host.getBoundingClientRect();
+		const visiblePages = this.findPageTargets().filter((page) => this.isPageNearViewport(page, hostRect));
 		const visiblePageNumbers = new Set<number>();
 		for (const page of visiblePages) {
 			const pageNumber = getPageNumber(page);
 			if (!pageNumber) continue;
 			visiblePageNumbers.add(pageNumber);
 			const layer = this.ensurePageInkLayer(page, pageNumber);
-			this.resizePageInkLayer(layer);
+			this.resizePageInkLayer(layer, false);
 			this.renderPageInkLayer(layer, strokesByPage.get(pageNumber) || []);
 		}
 		for (const [pageNumber, layer] of Array.from(this.pageInkLayers.entries())) {
@@ -665,14 +670,15 @@ export class PdfInkOverlay {
 		layer.previewCanvas.addEventListener("lostpointercapture", (event) => this.onPointerLost(event as PointerEvent), { signal, passive: false });
 	}
 
-	private resizePageInkLayer(layer: PdfPageInkLayer) {
+	private resizePageInkLayer(layer: PdfPageInkLayer, resizeCommitted = true) {
 		const rect = layer.stage.getBoundingClientRect();
 		const width = Math.max(1, rect.width);
 		const height = Math.max(1, rect.height);
-		const dpr = Math.min(window.devicePixelRatio || 1, 2);
+		const dpr = canvasDprForSize(width, height);
 		const pixelWidth = Math.ceil(width * dpr);
 		const pixelHeight = Math.ceil(height * dpr);
 		for (const canvas of [layer.canvas, layer.previewCanvas, layer.predictionCanvas]) {
+			if (canvas === layer.canvas && !resizeCommitted) continue;
 			if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
 				canvas.width = pixelWidth;
 				canvas.height = pixelHeight;
@@ -709,7 +715,13 @@ export class PdfInkOverlay {
 		const signature = this.pageRenderSignature(pageNumber, width, height, strokes);
 		if (!shouldRender(signature)) return;
 		const context = this.context(canvas);
-		const dpr = Math.min(window.devicePixelRatio || 1, 2);
+		const dpr = canvasDprForSize(width, height);
+		const pixelWidth = Math.ceil(width * dpr);
+		const pixelHeight = Math.ceil(height * dpr);
+		if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+			this.renderPageCanvasOffscreen(canvas, width, height, pixelWidth, pixelHeight, dpr, strokes);
+			return;
+		}
 		context.setTransform(dpr, 0, 0, dpr, 0, 0);
 		context.clearRect(0, 0, width, height);
 		for (const stroke of strokes) {
@@ -717,18 +729,50 @@ export class PdfInkOverlay {
 		}
 	}
 
+	private renderPageCanvasOffscreen(
+		canvas: HTMLCanvasElement,
+		width: number,
+		height: number,
+		pixelWidth: number,
+		pixelHeight: number,
+		dpr: number,
+		strokes: PdfInkStroke[]
+	) {
+		const buffer = document.createElement("canvas");
+		buffer.width = pixelWidth;
+		buffer.height = pixelHeight;
+		const bufferContext = this.context(buffer);
+		bufferContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+		bufferContext.clearRect(0, 0, width, height);
+		for (const stroke of strokes) {
+			renderStrokeOnPage(bufferContext, stroke, width, height, this.selectedStrokeIds.has(stroke.id) ? 0.45 : 1, this.strokeRenderCache);
+		}
+		canvas.width = pixelWidth;
+		canvas.height = pixelHeight;
+		const context = this.context(canvas);
+		context.setTransform(1, 0, 0, 1, 0, 0);
+		context.clearRect(0, 0, pixelWidth, pixelHeight);
+		context.drawImage(buffer, 0, 0);
+		context.setTransform(dpr, 0, 0, dpr, 0, 0);
+	}
+
 	private commitStrokeToVisibleLayer(stroke: PdfInkStroke) {
 		const layer = this.pageInkLayers.get(stroke.pageNumber);
 		if (!layer || !layer.stage.isConnected) return;
-		this.resizePageInkLayer(layer);
+		this.resizePageInkLayer(layer, false);
 		const width = Math.max(1, layer.width || layer.stage.getBoundingClientRect().width);
 		const height = Math.max(1, layer.height || layer.stage.getBoundingClientRect().height);
-		if (!layer.renderSignature || this.selectedStrokeIds.size > 0) {
+		const dpr = canvasDprForSize(width, height);
+		if (
+			!layer.renderSignature
+			|| this.selectedStrokeIds.size > 0
+			|| layer.canvas.width !== Math.ceil(width * dpr)
+			|| layer.canvas.height !== Math.ceil(height * dpr)
+		) {
 			this.renderPageNumberNow(stroke.pageNumber);
 			return;
 		}
 		const context = this.context(layer.canvas);
-		const dpr = Math.min(window.devicePixelRatio || 1, 2);
 		context.setTransform(dpr, 0, 0, dpr, 0, 0);
 		renderStrokeOnPage(context, stroke, width, height, 1, this.strokeRenderCache);
 		layer.renderSignature = this.pageRenderSignature(stroke.pageNumber, width, height, this.pageStrokes(stroke.pageNumber));
@@ -737,7 +781,7 @@ export class PdfInkOverlay {
 	private renderPageNumberNow(pageNumber: number) {
 		const layer = this.pageInkLayers.get(pageNumber);
 		if (!layer || !layer.stage.isConnected) return;
-		this.resizePageInkLayer(layer);
+		this.resizePageInkLayer(layer, false);
 		layer.renderSignature = "";
 		this.renderPageInkLayer(layer, this.pageStrokes(pageNumber));
 	}
@@ -1028,10 +1072,10 @@ export class PdfInkOverlay {
 		return normalizePath(`${dir}/${this.file.name.replace(/[^\w.\-\u4e00-\u9fa5]/g, "_")}.${hash(this.file.path)}.json`);
 	}
 
-	private resizeCanvases() {
+	private resizeCanvases(resizeCommitted = true) {
 		const rect = this.syncStageToInkTarget();
-		for (const layer of this.pageInkLayers.values()) this.resizePageInkLayer(layer);
-		if (this.activeLayer) this.resizePageInkLayer(this.activeLayer);
+		for (const layer of this.pageInkLayers.values()) this.resizePageInkLayer(layer, resizeCommitted);
+		if (this.activeLayer) this.resizePageInkLayer(this.activeLayer, resizeCommitted);
 		else this.lastStageRect = rect;
 	}
 
@@ -1100,6 +1144,16 @@ export class PdfInkOverlay {
 			if (!best || score > best.score) best = { element, score };
 		}
 		return best?.element || null;
+	}
+
+	private isPageNearViewport(page: HTMLElement, hostRect = this.host.getBoundingClientRect()) {
+		const rect = page.getBoundingClientRect();
+		const marginY = Math.max(hostRect.height, 1) * PAGE_VIRTUALIZATION_MARGIN;
+		const marginX = Math.max(hostRect.width, 1) * 0.35;
+		return rect.bottom >= hostRect.top - marginY
+			&& rect.top <= hostRect.bottom + marginY
+			&& rect.right >= hostRect.left - marginX
+			&& rect.left <= hostRect.right + marginX;
 	}
 
 	private findPageAtPoint(clientX: number, clientY: number): HTMLElement | null {
@@ -1278,6 +1332,55 @@ function renderStroke(context: CanvasRenderingContext2D, stroke: PdfInkStroke, a
 	if (stroke.points.length === 0) return;
 	const renderCache = buildStrokeRenderCache(stroke);
 	renderCachedStroke(context, stroke, renderCache, alphaScale);
+}
+
+function renderLiveStroke(context: CanvasRenderingContext2D, stroke: PdfInkStroke, alphaScale = 1) {
+	const points = stroke.points;
+	if (points.length === 0) return;
+	context.save();
+	context.strokeStyle = stroke.color;
+	context.fillStyle = stroke.color;
+	context.globalAlpha = (stroke.tool === "highlighter" ? 0.34 : 1) * alphaScale;
+	context.globalCompositeOperation = stroke.tool === "highlighter" ? "multiply" : "source-over";
+	context.lineCap = "round";
+	context.lineJoin = "round";
+
+	if (points.length === 1) {
+		const radius = Math.max(0.5, strokeWidthAt(stroke, points[0]) / 2);
+		context.beginPath();
+		context.arc(points[0].x, points[0].y, radius, 0, Math.PI * 2);
+		context.fill();
+		context.restore();
+		return;
+	}
+
+	const fixedWidth = stroke.tool === "highlighter" || stroke.tool === "ballpoint";
+	if (fixedWidth) {
+		context.lineWidth = Math.max(1, stroke.tool === "highlighter" ? stroke.width : stroke.width * 1.05);
+		context.beginPath();
+		context.moveTo(points[0].x, points[0].y);
+		for (let index = 1; index < points.length - 1; index++) {
+			const current = points[index];
+			const next = points[index + 1];
+			context.quadraticCurveTo(current.x, current.y, (current.x + next.x) / 2, (current.y + next.y) / 2);
+		}
+		const last = points[points.length - 1];
+		context.lineTo(last.x, last.y);
+		context.stroke();
+		context.restore();
+		return;
+	}
+
+	for (let index = 1; index < points.length; index++) {
+		const previous = points[index - 1];
+		const current = points[index];
+		context.lineWidth = Math.max(0.7, strokeWidthAt(stroke, current));
+		context.beginPath();
+		context.moveTo(previous.x, previous.y);
+		context.lineTo(current.x, current.y);
+		context.stroke();
+	}
+	context.restore();
 }
 
 function renderStrokeOnPage(
@@ -1636,6 +1739,14 @@ function parseRgb(color: string) {
 
 function clamp(value: number, min: number, max: number) {
 	return Math.max(min, Math.min(max, value));
+}
+
+function canvasDprForSize(width: number, height: number): number {
+	const deviceDpr = Math.min(window.devicePixelRatio || 1, 2);
+	const maxPixels = Platform.isMobile ? MAX_PDF_CANVAS_PIXELS_MOBILE : MAX_PDF_CANVAS_PIXELS_DESKTOP;
+	const area = Math.max(1, width * height);
+	const budgetDpr = Math.sqrt(maxPixels / area);
+	return clamp(Math.min(deviceDpr, budgetDpr), 0.5, deviceDpr);
 }
 
 function rectRelativeToHost(target: DOMRect, host: DOMRect): PdfInkRect {
