@@ -44,6 +44,19 @@ type PdfInkAction =
 	| { type: "add"; stroke: PdfInkStroke }
 	| { type: "remove"; strokes: Array<{ stroke: PdfInkStroke; index: number }> };
 
+interface PdfPassivePageLayer {
+	pageNumber: number;
+	page: HTMLElement;
+	stage: HTMLElement;
+	canvas: HTMLCanvasElement;
+	originalPosition: string;
+	positionChanged: boolean;
+	width: number;
+	height: number;
+}
+
+type ToolbarDock = "bottom" | "top" | "left" | "right";
+
 export class PdfInkOverlay {
 	private plugin: InkPlugin;
 	private file: TFile;
@@ -80,6 +93,14 @@ export class PdfInkOverlay {
 	private stageHost: HTMLElement | null = null;
 	private originalStageHostPosition = "";
 	private stageHostPositionChanged = false;
+	private passivePageLayers = new Map<number, PdfPassivePageLayer>();
+	private renderFrame: number | null = null;
+	private toolbar: HTMLElement;
+	private snapOverlay: HTMLElement;
+	private toolbarDock: ToolbarDock = "bottom";
+	private toolbarDrag:
+		| { pointerId: number; startX: number; startY: number; dock: ToolbarDock }
+		| null = null;
 
 	constructor(private app: App, plugin: InkPlugin, file: TFile, host: HTMLElement, onClosed?: () => void) {
 		this.plugin = plugin;
@@ -125,10 +146,13 @@ export class PdfInkOverlay {
 		if (this.closed) return;
 		this.closed = true;
 		if (this.data) void this.writeCache();
+		if (this.renderFrame !== null) window.cancelAnimationFrame(this.renderFrame);
 		this.resizeObserver?.disconnect();
 		this.abortController?.abort();
 		this.stage?.remove();
 		this.root?.remove();
+		for (const layer of this.passivePageLayers.values()) this.removePassivePageLayer(layer);
+		this.passivePageLayers.clear();
 		this.restoreStageHostPosition();
 		this.host.removeClass("anynote-pdf-native-host");
 		if (this.host.style.position === "relative" && !this.originalHostPosition) this.host.style.position = "";
@@ -138,6 +162,10 @@ export class PdfInkOverlay {
 
 	private createToolbar(root: HTMLElement): HTMLElement {
 		const toolbar = root.createDiv({ cls: "anynote-pdf-toolbar" });
+		this.toolbar = toolbar;
+		const dragHandle = toolbar.createDiv({ cls: "anynote-toolbar-drag-handle", attr: { title: "拖动工具栏", "aria-label": "拖动工具栏" } });
+		setIcon(dragHandle, "grip");
+		dragHandle.addEventListener("pointerdown", (event) => this.onToolbarDragStart(event), { signal: this.abortController?.signal });
 		const tools = toolbar.createDiv({ cls: "anynote-toolbar-group" });
 		this.toolButton(tools, "hand", "hand", "手/浏览");
 		this.toolButton(tools, "pen", "pen-line", "普通笔");
@@ -169,6 +197,11 @@ export class PdfInkOverlay {
 		this.iconButton(actions, "save", "保存", () => void this.save());
 		this.iconButton(actions, "file-down", "导出带批注 PDF", () => void this.exportAnnotatedPdf());
 		this.iconButton(actions, "x", "退出", () => this.close());
+		this.snapOverlay = root.createDiv({ cls: "anynote-toolbar-snap-overlay" });
+		for (const dock of ["top", "bottom", "left", "right"] as ToolbarDock[]) {
+			this.snapOverlay.createDiv({ cls: `anynote-snap-zone anynote-snap-${dock}` });
+		}
+		this.setToolbarDock(this.toolbarDock);
 		return toolbar;
 	}
 
@@ -187,6 +220,53 @@ export class PdfInkOverlay {
 		return button;
 	}
 
+	private onToolbarDragStart(event: PointerEvent) {
+		event.preventDefault();
+		event.stopPropagation();
+		this.toolbarDrag = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, dock: this.toolbarDock };
+		this.toolbar.setPointerCapture(event.pointerId);
+		this.root.addClass("is-snapping-toolbar");
+		this.toolbar.addClass("is-dragging");
+		const signal = this.abortController?.signal;
+		const onMove = (moveEvent: PointerEvent) => this.onToolbarDragMove(moveEvent);
+		const onEnd = (upEvent: PointerEvent) => {
+			this.onToolbarDragEnd(upEvent);
+			window.removeEventListener("pointermove", onMove);
+			window.removeEventListener("pointerup", onEnd);
+			window.removeEventListener("pointercancel", onEnd);
+		};
+		window.addEventListener("pointermove", onMove, { signal });
+		window.addEventListener("pointerup", onEnd, { signal });
+		window.addEventListener("pointercancel", onEnd, { signal });
+	}
+
+	private onToolbarDragMove(event: PointerEvent) {
+		if (!this.toolbarDrag || event.pointerId !== this.toolbarDrag.pointerId) return;
+		event.preventDefault();
+		const dock = dockFromPoint(event.clientX, event.clientY);
+		this.root.removeClasses(["is-snap-top", "is-snap-bottom", "is-snap-left", "is-snap-right"]);
+		this.root.addClass(`is-snap-${dock}`);
+		this.setToolbarDock(dock);
+	}
+
+	private onToolbarDragEnd(event: PointerEvent) {
+		if (!this.toolbarDrag || event.pointerId !== this.toolbarDrag.pointerId) return;
+		event.preventDefault();
+		const dock = dockFromPoint(event.clientX, event.clientY);
+		this.setToolbarDock(dock);
+		this.toolbarDrag = null;
+		this.root.removeClasses(["is-snapping-toolbar", "is-snap-top", "is-snap-bottom", "is-snap-left", "is-snap-right"]);
+		this.toolbar.removeClass("is-dragging");
+		if (this.toolbar.hasPointerCapture(event.pointerId)) this.toolbar.releasePointerCapture(event.pointerId);
+	}
+
+	private setToolbarDock(dock: ToolbarDock) {
+		this.toolbarDock = dock;
+		if (!this.toolbar) return;
+		this.toolbar.removeClasses(["dock-top", "dock-bottom", "dock-left", "dock-right"]);
+		this.toolbar.addClass(`dock-${dock}`);
+	}
+
 	private installEvents() {
 		const signal = this.abortController?.signal;
 		this.previewCanvas.addEventListener("pointerdown", (event) => this.onPointerDown(event), { signal, passive: false });
@@ -196,15 +276,15 @@ export class PdfInkOverlay {
 		this.previewCanvas.addEventListener("pointercancel", (event) => this.onPointerUp(event), { signal, passive: false });
 		window.addEventListener("resize", () => {
 			this.resizeCanvases();
-			this.renderAll();
+			this.scheduleRenderAll();
 		}, { signal });
 		this.host.addEventListener("scroll", () => {
 			this.resizeCanvases();
-			this.renderAll();
+			this.scheduleRenderAll();
 		}, { signal, capture: true });
 		this.resizeObserver = new ResizeObserver(() => {
 			this.resizeCanvases();
-			this.renderAll();
+			this.scheduleRenderAll();
 		});
 		this.resizeObserver.observe(this.host);
 	}
@@ -394,11 +474,92 @@ export class PdfInkOverlay {
 	}
 
 	private renderAll() {
+		const strokesByPage = this.strokesByPage();
 		this.clearCanvas(this.canvas);
 		const context = this.context(this.canvas);
-		for (const stroke of this.currentPageStrokes()) {
+		for (const stroke of strokesByPage.get(this.currentPageNumber()) || []) {
 			renderStroke(context, this.strokeForCurrentStage(stroke), this.selectedStrokeIds.has(stroke.id) ? 0.45 : 1);
 		}
+		this.renderPassivePageLayers(strokesByPage);
+	}
+
+	private scheduleRenderAll() {
+		if (this.renderFrame !== null) return;
+		this.renderFrame = window.requestAnimationFrame(() => {
+			this.renderFrame = null;
+			this.renderAll();
+		});
+	}
+
+	private renderPassivePageLayers(strokesByPage: Map<number, PdfInkStroke[]>) {
+		if (!this.data) return;
+		const activePage = this.currentPageNumber();
+		const visiblePages = this.findPageTargets();
+		const visiblePageNumbers = new Set<number>();
+		for (const page of visiblePages) {
+			const pageNumber = getPageNumber(page);
+			if (!pageNumber) continue;
+			visiblePageNumbers.add(pageNumber);
+			if (pageNumber === activePage) {
+				const existing = this.passivePageLayers.get(pageNumber);
+				if (existing) {
+					this.removePassivePageLayer(existing);
+					this.passivePageLayers.delete(pageNumber);
+				}
+				continue;
+			}
+			const layer = this.ensurePassivePageLayer(page, pageNumber);
+			this.renderPassivePageLayer(layer, strokesByPage.get(pageNumber) || []);
+		}
+		for (const [pageNumber, layer] of Array.from(this.passivePageLayers.entries())) {
+			if (!visiblePageNumbers.has(pageNumber)) {
+				this.removePassivePageLayer(layer);
+				this.passivePageLayers.delete(pageNumber);
+			}
+		}
+	}
+
+	private ensurePassivePageLayer(page: HTMLElement, pageNumber: number): PdfPassivePageLayer {
+		const existing = this.passivePageLayers.get(pageNumber);
+		if (existing && existing.page === page && existing.stage.isConnected) return existing;
+		if (existing) this.removePassivePageLayer(existing);
+		const originalPosition = page.style.position;
+		const positionChanged = getComputedStyle(page).position === "static";
+		if (positionChanged) page.style.position = "relative";
+		page.addClass("anynote-pdf-page-host");
+		const stage = page.createDiv({ cls: "anynote-pdf-passive-stage" });
+		const canvas = stage.createEl("canvas", { cls: "anynote-pdf-passive-canvas" });
+		const layer: PdfPassivePageLayer = { pageNumber, page, stage, canvas, originalPosition, positionChanged, width: 0, height: 0 };
+		this.passivePageLayers.set(pageNumber, layer);
+		return layer;
+	}
+
+	private renderPassivePageLayer(layer: PdfPassivePageLayer, strokes: PdfInkStroke[]) {
+		const rect = layer.stage.getBoundingClientRect();
+		const width = Math.max(1, rect.width);
+		const height = Math.max(1, rect.height);
+		const dpr = Math.min(window.devicePixelRatio || 1, 2);
+		const pixelWidth = Math.ceil(width * dpr);
+		const pixelHeight = Math.ceil(height * dpr);
+		if (layer.canvas.width !== pixelWidth || layer.canvas.height !== pixelHeight || layer.width !== width || layer.height !== height) {
+			layer.canvas.width = pixelWidth;
+			layer.canvas.height = pixelHeight;
+			layer.width = width;
+			layer.height = height;
+		}
+		const context = this.context(layer.canvas);
+		context.setTransform(dpr, 0, 0, dpr, 0, 0);
+		context.clearRect(0, 0, width, height);
+		for (const stroke of strokes) {
+			renderStroke(context, scaleStrokeToSize(stroke, width, height), this.selectedStrokeIds.has(stroke.id) ? 0.45 : 1);
+		}
+	}
+
+	private removePassivePageLayer(layer: PdfPassivePageLayer) {
+		layer.stage.remove();
+		if (layer.page === this.stageHost) return;
+		layer.page.removeClass("anynote-pdf-page-host");
+		if (layer.positionChanged) layer.page.style.position = layer.originalPosition;
 	}
 
 	private eraseAt(point: PdfInkPoint) {
@@ -466,25 +627,18 @@ export class PdfInkOverlay {
 		return (this.data?.strokes || []).filter((stroke) => stroke.pageNumber === pageNumber);
 	}
 
+	private strokesByPage() {
+		const byPage = new Map<number, PdfInkStroke[]>();
+		for (const stroke of this.data?.strokes || []) {
+			const strokes = byPage.get(stroke.pageNumber);
+			if (strokes) strokes.push(stroke);
+			else byPage.set(stroke.pageNumber, [stroke]);
+		}
+		return byPage;
+	}
+
 	private strokeForCurrentStage(stroke: PdfInkStroke): PdfInkStroke {
-		const sourceWidth = Math.max(1, stroke.pageWidth || this.data?.width || this.currentStageWidth());
-		const sourceHeight = Math.max(1, stroke.pageHeight || this.data?.height || this.currentStageHeight());
-		const targetWidth = this.currentStageWidth();
-		const targetHeight = this.currentStageHeight();
-		if (Math.abs(sourceWidth - targetWidth) < 0.5 && Math.abs(sourceHeight - targetHeight) < 0.5) return stroke;
-		const scaleX = targetWidth / sourceWidth;
-		const scaleY = targetHeight / sourceHeight;
-		return {
-			...stroke,
-			width: stroke.width * ((scaleX + scaleY) / 2),
-			pageWidth: targetWidth,
-			pageHeight: targetHeight,
-			points: stroke.points.map((point) => ({
-				...point,
-				x: point.x * scaleX,
-				y: point.y * scaleY
-			}))
-		};
+		return scaleStrokeToSize(stroke, this.currentStageWidth(), this.currentStageHeight(), this.data);
 	}
 
 	private currentStageWidth() {
@@ -689,20 +843,7 @@ export class PdfInkOverlay {
 
 	private findInkTarget(): HTMLElement | null {
 		const hostRect = this.host.getBoundingClientRect();
-		const selectors = [
-			".pdfViewer .page",
-			".pdf-viewer .page",
-			".pdf-container .page",
-			".page[data-page-number]",
-			"[data-page-number]",
-			"canvas"
-		];
-		const candidates = new Set<HTMLElement>();
-		for (const element of Array.from(this.host.querySelectorAll<HTMLElement>(selectors.join(",")))) {
-			const page = element.closest<HTMLElement>(".page[data-page-number], .page, [data-page-number]");
-			candidates.add(page || element);
-		}
-
+		const candidates = this.findPageTargets();
 		let best: { element: HTMLElement; score: number } | null = null;
 		for (const element of candidates) {
 			if (element === this.canvas || element === this.previewCanvas || element === this.predictionCanvas) continue;
@@ -718,6 +859,23 @@ export class PdfInkOverlay {
 			if (!best || score > best.score) best = { element, score };
 		}
 		return best?.element || null;
+	}
+
+	private findPageTargets(): HTMLElement[] {
+		const selectors = [
+			".pdfViewer .page",
+			".pdf-viewer .page",
+			".pdf-container .page",
+			".page[data-page-number]",
+			"[data-page-number]",
+			"canvas"
+		];
+		const candidates = new Set<HTMLElement>();
+		for (const element of Array.from(this.host.querySelectorAll<HTMLElement>(selectors.join(",")))) {
+			const page = element.closest<HTMLElement>(".page[data-page-number], .page, [data-page-number]");
+			candidates.add(page || element);
+		}
+		return Array.from(candidates);
 	}
 
 	private async waitForInkTarget() {
@@ -1163,6 +1321,27 @@ function cloneStroke(stroke: PdfInkStroke): PdfInkStroke {
 	return { ...stroke, points: stroke.points.map((point) => ({ ...point })) };
 }
 
+function scaleStrokeToSize(stroke: PdfInkStroke, targetWidth: number, targetHeight: number, data?: PdfInkData): PdfInkStroke {
+	const sourceWidth = Math.max(1, stroke.pageWidth || data?.width || targetWidth);
+	const sourceHeight = Math.max(1, stroke.pageHeight || data?.height || targetHeight);
+	targetWidth = Math.max(1, targetWidth);
+	targetHeight = Math.max(1, targetHeight);
+	if (Math.abs(sourceWidth - targetWidth) < 0.5 && Math.abs(sourceHeight - targetHeight) < 0.5) return stroke;
+	const scaleX = targetWidth / sourceWidth;
+	const scaleY = targetHeight / sourceHeight;
+	return {
+		...stroke,
+		width: stroke.width * ((scaleX + scaleY) / 2),
+		pageWidth: targetWidth,
+		pageHeight: targetHeight,
+		points: stroke.points.map((point) => ({
+			...point,
+			x: point.x * scaleX,
+			y: point.y * scaleY
+		}))
+	};
+}
+
 function restorePointVelocities(points: PdfInkPoint[]): PdfInkPoint[] {
 	return points.map((point, index) => {
 		const previous = points[index - 1];
@@ -1280,6 +1459,19 @@ function isPdfThumbnailElement(element: HTMLElement): boolean {
 
 function delay(ms: number): Promise<void> {
 	return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function dockFromPoint(x: number, y: number): ToolbarDock {
+	const width = Math.max(1, window.innerWidth);
+	const height = Math.max(1, window.innerHeight);
+	const distances: Array<{ dock: ToolbarDock; distance: number }> = [
+		{ dock: "top", distance: y },
+		{ dock: "bottom", distance: height - y },
+		{ dock: "left", distance: x },
+		{ dock: "right", distance: width - x }
+	];
+	distances.sort((a, b) => a.distance - b.distance);
+	return distances[0].dock;
 }
 
 async function ensureFolder(app: App, dir: string) {
