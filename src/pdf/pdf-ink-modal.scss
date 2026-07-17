@@ -12,7 +12,10 @@
 
 .anynote-pdf-stage {
 	position: absolute;
-	inset: 0;
+	left: 0;
+	top: 0;
+	width: 1px;
+	height: 1px;
 	pointer-events: none;
 }
 
@@ -110,11 +113,11 @@
 
 .anynote-tool-button.is-active,
 .anynote-tool-button[aria-pressed="true"] {
-	background: var(--interactive-accent);
-	color: var(--text-on-accent);
+	background: var(--interactive-accent, #7c5cff);
+	color: var(--text-on-accent, #ffffff);
 	box-shadow:
-		0 0 0 2px color-mix(in srgb, var(--interactive-accent) 22%, transparent),
-		inset 0 0 0 1px color-mix(in srgb, var(--text-on-accent) 32%, transparent);
+		0 0 0 2px color-mix(in srgb, var(--interactive-accent, #7c5cff) 22%, transparent),
+		inset 0 0 0 1px color-mix(in srgb, var(--text-on-accent, #ffffff) 32%, transparent);
 }
 
 .anynote-icon-button svg {

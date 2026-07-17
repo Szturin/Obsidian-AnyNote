@@ -5,7 +5,7 @@
 - 插件 id：`obsidian-anynote`
 - 插件名：`Obsidian AnyNote`
 - npm 包名：`obsidian-anynote`
-- 当前版本：`0.2.5`
+- 当前版本：`0.2.6`
 - 目标 GitHub 仓库：`Szturin/Obsidian-AnyNote`
 
 ## 必须遵守的许可边界
@@ -36,7 +36,7 @@ npm run build
 ## 关键文件
 
 - `src/main.ts`：插件入口，注册手写、绘图和 PDF 批注命令。
-- `src/pdf/pdf-ink-modal.ts`：PDF 原生视图覆盖层和 Canvas 手写核心。
+- `src/pdf/pdf-ink-modal.ts`：PDF 原生视图页级覆盖层和 Canvas 手写核心。
 - `src/pdf/pdf-ink-modal.scss`：PDF 批注工具栏和覆盖层样式。
 - `src/tldraw/writing/tldraw-writing-editor.tsx`：手写编辑器。
 - `src/tldraw/drawing/tldraw-drawing-editor.tsx`：绘图编辑器。
@@ -45,21 +45,22 @@ npm run build
 
 ## PDF 批注事实
 
-PDF 批注是原生 PDF 视图内的覆盖层 JSON 批注：
+PDF 批注是原生 PDF 视图内的页级 JSON 批注：
 
 - 不修改 PDF。
 - 不生成 PDF 附件。
 - 不向 Markdown 插入 SVG。
 - 数据保存在 `.obsidian/plugins/obsidian-anynote/pdf-annotations/*.json`。
-- 用户点击 `导出带批注 PDF` 时，会额外生成新的 `*.anynote.pdf`，并以矢量线段写入当前批注。
-- 当前 PDF 导出只映射到第一页；多页逐页模型仍待实现。
+- 每条 stroke 必须绑定 `pageNumber`、`pageWidth`、`pageHeight` 和页内坐标。
+- 用户点击 `导出带批注 PDF` 时，会额外生成新的 `*.anynote.pdf`，并按页码以矢量线段写入当前批注。
 - 工具栏直接挂载在 Obsidian 当前 PDF leaf 的 `.view-content` 内，不再创建 modal、iframe 或独立窗口。
+- 书写 stage 必须跟随真实 PDF 页面元素，不允许覆盖 PDF 顶部控件、左侧缩略图目录或右侧面板。
 - 工具栏包含“手/浏览”模式；该模式会让底层 PDF 接收拖动和滚动事件。
 - 当前工具按钮必须有 `is-active`/`aria-pressed` 选中状态。
 
 ## BRAT 发布准备
 
-`.github/workflows/release.yml` 会在推送版本标签时构建并上传 BRAT 需要的 release assets。优先使用与 `manifest.json` 版本一致的标签，例如 `0.2.5`。
+`.github/workflows/release.yml` 会在推送版本标签时构建并上传 BRAT 需要的 release assets。优先使用与 `manifest.json` 版本一致的标签，例如 `0.2.6`。
 
 - `main.js`
 - `manifest.json`
@@ -75,7 +76,7 @@ PDF 批注是原生 PDF 视图内的覆盖层 JSON 批注：
 - 增加笔画预测层。
 - 继续对齐 tldraw/freehand 的速度、压力和曲率笔迹模型。
 - 为橡皮/框选增加空间索引。
-- 建立 PDF 多页坐标模型。
+- 将页级 JSON 批注升级为更接近 PDF 原生 annotation object 的模型。
 - 避免每次输入都全量重绘。
 
 修改后至少运行：

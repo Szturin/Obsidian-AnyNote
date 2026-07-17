@@ -18,6 +18,9 @@ interface PdfInkStroke {
 	tool: Exclude<PdfInkTool, "hand" | "eraser" | "select">;
 	color: string;
 	width: number;
+	pageNumber: number;
+	pageWidth: number;
+	pageHeight: number;
 	points: PdfInkPoint[];
 }
 
@@ -72,6 +75,7 @@ export class PdfInkOverlay {
 	private resizeObserver: ResizeObserver | null = null;
 	private originalHostPosition = "";
 	private closed = false;
+	private lastStageRect: PdfInkRect | null = null;
 
 	constructor(private app: App, plugin: InkPlugin, file: TFile, host: HTMLElement, onClosed?: () => void) {
 		this.plugin = plugin;
@@ -98,6 +102,7 @@ export class PdfInkOverlay {
 		this.updateToolUi();
 
 		await nextFrame();
+		await this.waitForInkTarget();
 		this.resizeCanvases();
 		this.data = await this.load();
 		this.renderAll();
@@ -183,11 +188,15 @@ export class PdfInkOverlay {
 			this.resizeCanvases();
 			this.renderAll();
 		}, { signal });
+		this.host.addEventListener("scroll", () => {
+			this.resizeCanvases();
+			this.renderAll();
+		}, { signal, capture: true });
 		this.resizeObserver = new ResizeObserver(() => {
 			this.resizeCanvases();
 			this.renderAll();
 		});
-		this.resizeObserver.observe(this.stage);
+		this.resizeObserver.observe(this.host);
 	}
 
 	private onPointerDown(event: PointerEvent) {
@@ -217,6 +226,9 @@ export class PdfInkOverlay {
 			tool: activeTool,
 			color: activeTool === "highlighter" ? this.highlighterColor : this.color,
 			width: activeTool === "highlighter" ? this.highlighterWidth : this.width,
+			pageNumber: this.currentPageNumber(),
+			pageWidth: Math.max(1, this.canvas.clientWidth),
+			pageHeight: Math.max(1, this.canvas.clientHeight),
 			points: [point]
 		};
 		this.renderCurrentStroke();
@@ -237,7 +249,7 @@ export class PdfInkOverlay {
 		if (activeTool === "select" && this.selectionStart) {
 			const rect = rectFromPoints(this.selectionStart, this.eventToPoint(event));
 			this.updateSelectionBox(rect);
-			this.selectedStrokeIds = new Set(this.data.strokes.filter((stroke) => strokeIntersectsRect(stroke, rect)).map((stroke) => stroke.id));
+			this.selectedStrokeIds = new Set(this.currentPageStrokes().filter((stroke) => strokeIntersectsRect(this.strokeForCurrentStage(stroke), rect)).map((stroke) => stroke.id));
 			this.renderAll();
 			return;
 		}
@@ -353,8 +365,8 @@ export class PdfInkOverlay {
 	private renderAll() {
 		this.clearCanvas(this.canvas);
 		const context = this.context(this.canvas);
-		for (const stroke of this.data?.strokes || []) {
-			renderStroke(context, stroke, this.selectedStrokeIds.has(stroke.id) ? 0.45 : 1);
+		for (const stroke of this.currentPageStrokes()) {
+			renderStroke(context, this.strokeForCurrentStage(stroke), this.selectedStrokeIds.has(stroke.id) ? 0.45 : 1);
 		}
 	}
 
@@ -362,7 +374,7 @@ export class PdfInkOverlay {
 		const removed: Array<{ stroke: PdfInkStroke; index: number }> = [];
 		const remaining: PdfInkStroke[] = [];
 		this.data.strokes.forEach((stroke, index) => {
-			if (strokeIntersectsPoint(stroke, point, this.eraserRadius)) removed.push({ stroke: cloneStroke(stroke), index });
+			if (stroke.pageNumber === this.currentPageNumber() && strokeIntersectsPoint(this.strokeForCurrentStage(stroke), point, this.eraserRadius)) removed.push({ stroke: cloneStroke(stroke), index });
 			else remaining.push(stroke);
 		});
 		if (removed.length === 0) return;
@@ -385,6 +397,36 @@ export class PdfInkOverlay {
 		this.redoStack = [];
 		this.clearSelection();
 		this.renderAll();
+	}
+
+	private currentPageNumber() {
+		return getPageNumber(this.findInkTarget()) || 1;
+	}
+
+	private currentPageStrokes() {
+		const pageNumber = this.currentPageNumber();
+		return (this.data?.strokes || []).filter((stroke) => stroke.pageNumber === pageNumber);
+	}
+
+	private strokeForCurrentStage(stroke: PdfInkStroke): PdfInkStroke {
+		const sourceWidth = Math.max(1, stroke.pageWidth || this.data?.width || this.canvas.clientWidth);
+		const sourceHeight = Math.max(1, stroke.pageHeight || this.data?.height || this.canvas.clientHeight);
+		const targetWidth = Math.max(1, this.canvas.clientWidth);
+		const targetHeight = Math.max(1, this.canvas.clientHeight);
+		if (Math.abs(sourceWidth - targetWidth) < 0.5 && Math.abs(sourceHeight - targetHeight) < 0.5) return stroke;
+		const scaleX = targetWidth / sourceWidth;
+		const scaleY = targetHeight / sourceHeight;
+		return {
+			...stroke,
+			width: stroke.width * ((scaleX + scaleY) / 2),
+			pageWidth: targetWidth,
+			pageHeight: targetHeight,
+			points: stroke.points.map((point) => ({
+				...point,
+				x: point.x * scaleX,
+				y: point.y * scaleY
+			}))
+		};
 	}
 
 	private undo() {
@@ -456,6 +498,13 @@ export class PdfInkOverlay {
 			.map((stroke) => ({
 				...stroke,
 				width: clamp(stroke.width, 0.5, 80),
+				pageNumber: Number.isFinite(stroke.pageNumber) && stroke.pageNumber > 0 ? Math.floor(stroke.pageNumber) : 1,
+				pageWidth: Number.isFinite(stroke.pageWidth) && stroke.pageWidth > 0
+					? stroke.pageWidth
+					: (storedWidth !== undefined && Number.isFinite(storedWidth) && storedWidth > 0 ? storedWidth : Math.max(1, this.canvas.clientWidth)),
+				pageHeight: Number.isFinite(stroke.pageHeight) && stroke.pageHeight > 0
+					? stroke.pageHeight
+					: (storedHeight !== undefined && Number.isFinite(storedHeight) && storedHeight > 0 ? storedHeight : Math.max(1, this.canvas.clientHeight)),
 				points: restorePointVelocities(stroke.points
 					.filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
 					.map((point) => ({
@@ -487,12 +536,14 @@ export class PdfInkOverlay {
 			await this.writeCache();
 			const sourceBytes = await this.app.vault.readBinary(this.file);
 			const pdf = await PDFDocument.load(sourceBytes);
-			const firstPage = pdf.getPages()[0];
-			if (!firstPage) {
+			const pages = pdf.getPages();
+			if (pages.length === 0) {
 				new Notice("PDF 没有可导出的页面");
 				return;
 			}
-			drawPdfInkOnPage(firstPage, this.data);
+			for (let index = 0; index < pages.length; index++) {
+				drawPdfInkOnPage(pages[index], this.data, index + 1);
+			}
 			const outputBytes = await pdf.save();
 			const outputPath = await this.nextExportPath();
 			const outputBuffer = outputBytes.buffer.slice(outputBytes.byteOffset, outputBytes.byteOffset + outputBytes.byteLength) as ArrayBuffer;
@@ -521,13 +572,73 @@ export class PdfInkOverlay {
 	}
 
 	private resizeCanvases() {
-		const rect = this.stage.getBoundingClientRect();
+		const rect = this.syncStageToInkTarget();
 		for (const canvas of [this.canvas, this.previewCanvas, this.predictionCanvas]) {
 			const dpr = Math.min(window.devicePixelRatio || 1, 2);
 			canvas.width = Math.max(1, Math.ceil(rect.width * dpr));
 			canvas.height = Math.max(1, Math.ceil(rect.height * dpr));
 			const context = this.context(canvas);
 			context.setTransform(dpr, 0, 0, dpr, 0, 0);
+		}
+	}
+
+	private syncStageToInkTarget(): PdfInkRect {
+		const hostRect = this.host.getBoundingClientRect();
+		const targetRect = this.findInkTarget()?.getBoundingClientRect();
+		const rect = targetRect ? rectRelativeToHost(targetRect, hostRect) : fallbackInkRect(hostRect);
+		const nextRect = {
+			x: Math.max(0, rect.x),
+			y: Math.max(0, rect.y),
+			width: Math.max(1, Math.min(rect.width, hostRect.width - Math.max(0, rect.x))),
+			height: Math.max(1, Math.min(rect.height, hostRect.height - Math.max(0, rect.y)))
+		};
+		if (!sameRect(this.lastStageRect, nextRect)) {
+			this.stage.style.left = `${nextRect.x}px`;
+			this.stage.style.top = `${nextRect.y}px`;
+			this.stage.style.width = `${nextRect.width}px`;
+			this.stage.style.height = `${nextRect.height}px`;
+			this.lastStageRect = nextRect;
+		}
+		return nextRect;
+	}
+
+	private findInkTarget(): HTMLElement | null {
+		const hostRect = this.host.getBoundingClientRect();
+		const selectors = [
+			".pdfViewer .page",
+			".pdf-viewer .page",
+			".pdf-container .page",
+			".page[data-page-number]",
+			"[data-page-number]",
+			"canvas"
+		];
+		const candidates = new Set<HTMLElement>();
+		for (const element of Array.from(this.host.querySelectorAll<HTMLElement>(selectors.join(",")))) {
+			const page = element.closest<HTMLElement>(".page[data-page-number], .page, [data-page-number]");
+			candidates.add(page || element);
+		}
+
+		let best: { element: HTMLElement; score: number } | null = null;
+		for (const element of candidates) {
+			if (element === this.canvas || element === this.previewCanvas || element === this.predictionCanvas) continue;
+			if (element.closest(".anynote-pdf-overlay-root")) continue;
+			if (isPdfThumbnailElement(element)) continue;
+			const rect = element.getBoundingClientRect();
+			if (rect.width < hostRect.width * 0.28 || rect.height < hostRect.height * 0.28) continue;
+			const visibleWidth = Math.max(0, Math.min(rect.right, hostRect.right) - Math.max(rect.left, hostRect.left));
+			const visibleHeight = Math.max(0, Math.min(rect.bottom, hostRect.bottom) - Math.max(rect.top, hostRect.top));
+			const visibleArea = visibleWidth * visibleHeight;
+			if (visibleArea <= 0) continue;
+			const score = visibleArea + rect.width * rect.height * 0.08;
+			if (!best || score > best.score) best = { element, score };
+		}
+		return best?.element || null;
+	}
+
+	private async waitForInkTarget() {
+		for (let index = 0; index < 10; index++) {
+			if (this.findInkTarget()) return;
+			await delay(40);
 		}
 	}
 
@@ -962,15 +1073,14 @@ function restorePointVelocities(points: PdfInkPoint[]): PdfInkPoint[] {
 	});
 }
 
-function drawPdfInkOnPage(page: PDFPage, data: PdfInkData) {
+function drawPdfInkOnPage(page: PDFPage, data: PdfInkData, pageNumber: number) {
 	const { width: pageWidth, height: pageHeight } = page.getSize();
-	const sourceWidth = Math.max(1, data.width);
-	const sourceHeight = Math.max(1, data.height);
-	const scaleX = pageWidth / sourceWidth;
-	const scaleY = pageHeight / sourceHeight;
-	const scale = (scaleX + scaleY) / 2;
-
-	for (const stroke of data.strokes) {
+	for (const stroke of data.strokes.filter((item) => item.pageNumber === pageNumber)) {
+		const sourceWidth = Math.max(1, stroke.pageWidth || data.width);
+		const sourceHeight = Math.max(1, stroke.pageHeight || data.height);
+		const scaleX = pageWidth / sourceWidth;
+		const scaleY = pageHeight / sourceHeight;
+		const scale = (scaleX + scaleY) / 2;
 		if (stroke.points.length === 1) {
 			const point = toPdfPoint(stroke.points[0], sourceWidth, sourceHeight, pageWidth, pageHeight);
 			const radius = Math.max(0.25, stroke.width * scale * stroke.points[0].pressure * 0.5);
@@ -1026,6 +1136,47 @@ function parseRgb(color: string) {
 
 function clamp(value: number, min: number, max: number) {
 	return Math.max(min, Math.min(max, value));
+}
+
+function rectRelativeToHost(target: DOMRect, host: DOMRect): PdfInkRect {
+	return {
+		x: target.left - host.left,
+		y: target.top - host.top,
+		width: target.width,
+		height: target.height
+	};
+}
+
+function fallbackInkRect(host: DOMRect): PdfInkRect {
+	return {
+		x: Math.max(0, host.width * 0.18),
+		y: Math.max(0, host.height * 0.08),
+		width: Math.max(1, host.width * 0.7),
+		height: Math.max(1, host.height * 0.84)
+	};
+}
+
+function sameRect(a: PdfInkRect | null, b: PdfInkRect) {
+	if (!a) return false;
+	return Math.abs(a.x - b.x) < 0.5
+		&& Math.abs(a.y - b.y) < 0.5
+		&& Math.abs(a.width - b.width) < 0.5
+		&& Math.abs(a.height - b.height) < 0.5;
+}
+
+function getPageNumber(element: HTMLElement | null): number | null {
+	const page = element?.closest<HTMLElement>("[data-page-number], .page");
+	const value = page?.getAttr("data-page-number") || element?.getAttr("data-page-number");
+	const parsed = value ? Number(value) : NaN;
+	return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : null;
+}
+
+function isPdfThumbnailElement(element: HTMLElement): boolean {
+	return Boolean(element.closest(".thumbnail, .thumbnailView, .pdf-thumbnail, .pdf-sidebar, .sidebar, .tree-item"));
+}
+
+function delay(ms: number): Promise<void> {
+	return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 async function ensureFolder(app: App, dir: string) {
