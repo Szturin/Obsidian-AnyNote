@@ -1,5 +1,6 @@
 import "./pdf-ink-modal.scss";
 import { App, Modal, Notice, Plugin, TFile, normalizePath, setIcon } from "obsidian";
+import { PDFDocument, PDFPage, rgb } from "pdf-lib";
 
 type PdfInkTool = "pen" | "ballpoint" | "highlighter" | "eraser" | "select";
 
@@ -96,6 +97,7 @@ export class PdfInkModal extends Modal {
 	}
 
 	onClose() {
+		if (this.data) void this.writeCache();
 		this.abortController?.abort();
 		this.contentEl.empty();
 	}
@@ -130,6 +132,7 @@ export class PdfInkModal extends Modal {
 		this.iconButton(actions, "redo-2", "重做", () => this.redo());
 		this.iconButton(actions, "trash-2", "删除选中", () => this.deleteSelected());
 		this.iconButton(actions, "save", "保存", () => void this.save());
+		this.iconButton(actions, "file-down", "导出带批注 PDF", () => void this.exportAnnotatedPdf());
 		this.iconButton(actions, "x", "退出", () => this.close());
 		return toolbar;
 	}
@@ -156,6 +159,7 @@ export class PdfInkModal extends Modal {
 
 	private onPointerDown(event: PointerEvent) {
 		event.preventDefault();
+		if (this.pointerId !== null) return;
 		this.pointerId = event.pointerId;
 		this.previewCanvas.setPointerCapture(event.pointerId);
 		const point = this.eventToPoint(event);
@@ -330,20 +334,104 @@ export class PdfInkModal extends Modal {
 		if (await this.app.vault.adapter.exists(path)) {
 			try {
 				const parsed = JSON.parse(await this.app.vault.adapter.read(path)) as PdfInkData;
-				if (Array.isArray(parsed.strokes)) return parsed;
+				const repaired = this.normalizeLoadedData(parsed);
+				if (repaired) return repaired;
 			} catch (error) {
 				console.error("PDF ink load failed", error);
+				new Notice("PDF 批注缓存读取失败，将使用空白批注层");
 			}
 		}
 		return { version: 1, sourcePath: this.file.path, width: this.canvas.clientWidth, height: this.canvas.clientHeight, strokes: [], updatedAt: Date.now() };
 	}
 
 	private async save() {
-		this.data.updatedAt = Date.now();
-		this.data.width = this.canvas.clientWidth;
-		this.data.height = this.canvas.clientHeight;
-		await this.app.vault.adapter.write(this.dataPath(), JSON.stringify(this.data, null, 2));
+		await this.writeCache();
 		new Notice("PDF 批注已保存");
+	}
+
+	private async writeCache() {
+		this.data.updatedAt = Date.now();
+		this.data.sourcePath = this.file.path;
+		this.data.width = Math.max(1, this.canvas.clientWidth);
+		this.data.height = Math.max(1, this.canvas.clientHeight);
+		await this.app.vault.adapter.write(this.dataPath(), JSON.stringify(this.data, null, 2));
+	}
+
+	private normalizeLoadedData(parsed: Partial<PdfInkData>): PdfInkData | null {
+		if (!parsed || !Array.isArray(parsed.strokes)) return null;
+		const storedWidth = parsed.width;
+		const storedHeight = parsed.height;
+		const storedUpdatedAt = parsed.updatedAt;
+		const strokes = parsed.strokes
+			.filter((stroke): stroke is PdfInkStroke => {
+				return Boolean(
+					stroke
+					&& typeof stroke.id === "string"
+					&& (stroke.tool === "pen" || stroke.tool === "ballpoint" || stroke.tool === "highlighter")
+					&& typeof stroke.color === "string"
+					&& Number.isFinite(stroke.width)
+					&& Array.isArray(stroke.points)
+				);
+			})
+			.map((stroke) => ({
+				...stroke,
+				width: clamp(stroke.width, 0.5, 80),
+				points: stroke.points
+					.filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
+					.map((point) => ({
+						x: point.x,
+						y: point.y,
+						t: Number.isFinite(point.t) ? point.t : Date.now(),
+						pressure: clamp(Number.isFinite(point.pressure) ? point.pressure : 0.5, 0.05, 1)
+					}))
+			}))
+			.filter((stroke) => stroke.points.length > 0);
+
+		return {
+			version: 1,
+			sourcePath: typeof parsed.sourcePath === "string" ? parsed.sourcePath : this.file.path,
+			width: storedWidth !== undefined && Number.isFinite(storedWidth) && storedWidth > 0 ? storedWidth : Math.max(1, this.canvas.clientWidth),
+			height: storedHeight !== undefined && Number.isFinite(storedHeight) && storedHeight > 0 ? storedHeight : Math.max(1, this.canvas.clientHeight),
+			strokes,
+			updatedAt: storedUpdatedAt !== undefined && Number.isFinite(storedUpdatedAt) ? storedUpdatedAt : Date.now()
+		};
+	}
+
+	private async exportAnnotatedPdf() {
+		try {
+			if (this.currentStroke) {
+				new Notice("请先抬笔结束当前笔画，再导出 PDF");
+				return;
+			}
+			await this.writeCache();
+			const sourceBytes = await this.app.vault.readBinary(this.file);
+			const pdf = await PDFDocument.load(sourceBytes);
+			const firstPage = pdf.getPages()[0];
+			if (!firstPage) {
+				new Notice("PDF 没有可导出的页面");
+				return;
+			}
+			drawPdfInkOnPage(firstPage, this.data);
+			const outputBytes = await pdf.save();
+			const outputPath = await this.nextExportPath();
+			const outputBuffer = outputBytes.buffer.slice(outputBytes.byteOffset, outputBytes.byteOffset + outputBytes.byteLength) as ArrayBuffer;
+			await this.app.vault.createBinary(outputPath, outputBuffer);
+			new Notice(`已导出带批注 PDF：${outputPath}`);
+		} catch (error) {
+			console.error("PDF ink export failed", error);
+			new Notice("导出带批注 PDF 失败，请查看开发者控制台");
+		}
+	}
+
+	private async nextExportPath() {
+		const parent = this.file.parent?.path && this.file.parent.path !== "/" ? this.file.parent.path : "";
+		const base = this.file.basename.replace(/[^\w.\-\u4e00-\u9fa5]/g, "_");
+		for (let index = 0; index < 1000; index++) {
+			const suffix = index === 0 ? "" : `-${index + 1}`;
+			const candidate = normalizePath(`${parent ? `${parent}/` : ""}${base}.anynote${suffix}.pdf`);
+			if (!(await this.app.vault.adapter.exists(candidate))) return candidate;
+		}
+		throw new Error("Cannot allocate annotated PDF output path.");
 	}
 
 	private dataPath() {
@@ -481,6 +569,73 @@ function distanceSquared(a: Pick<PdfInkPoint, "x" | "y">, b: Pick<PdfInkPoint, "
 
 function cloneStroke(stroke: PdfInkStroke): PdfInkStroke {
 	return { ...stroke, points: stroke.points.map((point) => ({ ...point })) };
+}
+
+function drawPdfInkOnPage(page: PDFPage, data: PdfInkData) {
+	const { width: pageWidth, height: pageHeight } = page.getSize();
+	const sourceWidth = Math.max(1, data.width);
+	const sourceHeight = Math.max(1, data.height);
+	const scaleX = pageWidth / sourceWidth;
+	const scaleY = pageHeight / sourceHeight;
+	const scale = (scaleX + scaleY) / 2;
+
+	for (const stroke of data.strokes) {
+		if (stroke.points.length === 1) {
+			const point = toPdfPoint(stroke.points[0], sourceWidth, sourceHeight, pageWidth, pageHeight);
+			const radius = Math.max(0.25, stroke.width * scale * stroke.points[0].pressure * 0.5);
+			page.drawEllipse({
+				x: point.x,
+				y: point.y,
+				xScale: radius,
+				yScale: radius,
+				color: parseRgb(stroke.color),
+				opacity: stroke.tool === "highlighter" ? 0.34 : 1
+			});
+			continue;
+		}
+
+		for (let index = 1; index < stroke.points.length; index++) {
+			const a = stroke.points[index - 1];
+			const b = stroke.points[index];
+			const start = toPdfPoint(a, sourceWidth, sourceHeight, pageWidth, pageHeight);
+			const end = toPdfPoint(b, sourceWidth, sourceHeight, pageWidth, pageHeight);
+			const pressure = stroke.tool === "ballpoint" ? 0.82 : (a.pressure + b.pressure) / 2;
+			page.drawLine({
+				start,
+				end,
+				thickness: Math.max(0.25, stroke.width * scale * (0.45 + pressure * 0.75)),
+				color: parseRgb(stroke.color),
+				opacity: stroke.tool === "highlighter" ? 0.34 : 1
+			});
+		}
+	}
+}
+
+function toPdfPoint(
+	point: PdfInkPoint,
+	sourceWidth: number,
+	sourceHeight: number,
+	pageWidth: number,
+	pageHeight: number
+) {
+	return {
+		x: clamp(point.x / sourceWidth, 0, 1) * pageWidth,
+		y: pageHeight - clamp(point.y / sourceHeight, 0, 1) * pageHeight
+	};
+}
+
+function parseRgb(color: string) {
+	const match = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(color);
+	if (!match) return rgb(0, 0, 0);
+	return rgb(
+		parseInt(match[1], 16) / 255,
+		parseInt(match[2], 16) / 255,
+		parseInt(match[3], 16) / 255
+	);
+}
+
+function clamp(value: number, min: number, max: number) {
+	return Math.max(min, Math.min(max, value));
 }
 
 async function ensureFolder(app: App, dir: string) {

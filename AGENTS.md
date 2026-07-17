@@ -5,6 +5,7 @@
 - 插件 id：`obsidian-anynote`
 - 插件名：`Obsidian AnyNote`
 - npm 包名：`obsidian-anynote`
+- 当前版本：`0.2.0`
 - 目标 GitHub 仓库：`Szturin/Obsidian-AnyNote`
 
 ## 必须遵守的许可边界
@@ -50,6 +51,19 @@ PDF 批注是覆盖层 JSON 批注：
 - 不生成 PDF 附件。
 - 不向 Markdown 插入 SVG。
 - 数据保存在 `.obsidian/plugins/obsidian-anynote/pdf-annotations/*.json`。
+- 用户点击 `导出带批注 PDF` 时，会额外生成新的 `*.anynote.pdf`，并以矢量线段写入当前批注。
+- 当前 PDF 导出只映射到第一页；多页逐页模型仍待实现。
+
+## BRAT 发布准备
+
+`.github/workflows/release.yml` 会在推送版本标签时构建并上传 BRAT 需要的 release assets。优先使用与 `manifest.json` 版本一致的标签，例如 `0.2.0`。
+
+- `main.js`
+- `manifest.json`
+- `styles.css`
+- `versions.json`
+
+不要把当前复制派生代码推送到公开 GitHub 仓库，除非已经取得上游授权或完成 clean-room 重写。若使用私有仓库，需要确认 BRAT 客户端能访问该仓库和 release assets。
 
 ## 手写优化方向
 
