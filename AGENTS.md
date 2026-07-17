@@ -5,7 +5,7 @@
 - 插件 id：`obsidian-anynote`
 - 插件名：`Obsidian AnyNote`
 - npm 包名：`obsidian-anynote`
-- 当前版本：`0.2.13`
+- 当前版本：`0.2.14`
 - 目标 GitHub 仓库：`Szturin/Obsidian-AnyNote`
 
 ## 必须遵守的许可边界
@@ -70,7 +70,7 @@ PDF 批注是原生 PDF 视图内的页级 JSON 批注：
 
 ## BRAT 发布准备
 
-`.github/workflows/release.yml` 会在推送版本标签时构建并上传 BRAT 需要的 release assets。优先使用与 `manifest.json` 版本一致的标签，例如 `0.2.13`。
+`.github/workflows/release.yml` 会在推送版本标签时构建并上传 BRAT 需要的 release assets。优先使用与 `manifest.json` 版本一致的标签，例如 `0.2.14`。
 
 - `main.js`
 - `manifest.json`
@@ -85,7 +85,7 @@ PDF 批注是原生 PDF 视图内的页级 JSON 批注：
 
 - 增加笔画预测层。
 - PDF 笔迹已经切到 tldraw/freehand 同构算法；后续重点是 iPad Pencil 实机采样、预测和大批量 stroke 性能。
-- 为橡皮/框选增加空间索引；当前 0.2.13 已完成页级 dirty 渲染和抬笔增量提交。
+- 为橡皮/框选增加空间索引；当前 0.2.14 已完成页级 dirty 渲染、抬笔增量提交和 PDF 初始化失败恢复。
 - 将页级 JSON 批注升级为更接近 PDF 原生 annotation object 的模型。
 - 避免每次输入都全量重绘。
 

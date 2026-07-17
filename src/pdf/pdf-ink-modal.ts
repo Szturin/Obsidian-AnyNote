@@ -152,7 +152,9 @@ export class PdfInkOverlay {
 		this.updateToolUi();
 
 		await nextFrame();
-		await this.waitForInkTarget();
+		if (!(await this.waitForInkTarget())) {
+			throw new Error("PDF page target was not ready for ink overlay.");
+		}
 		this.data = await this.load();
 		this.syncStageToInkTarget();
 		this.resizeCanvases();
@@ -323,6 +325,11 @@ export class PdfInkOverlay {
 	private onPointerDown(event: PointerEvent) {
 		if (this.pointerId !== null) this.recoverInterruptedPointer(event);
 		if (this.pointerId !== null) return;
+		if (!this.activeLayer) {
+			const page = this.findPageAtPoint(event.clientX, event.clientY) || this.findInkTarget();
+			if (page) this.activatePageLayer(page);
+			if (!this.activeLayer) return;
+		}
 		const activeTool = this.getActiveTool(event);
 		if (activeTool === "hand") return;
 		event.preventDefault();
@@ -441,7 +448,7 @@ export class PdfInkOverlay {
 		if (tool === "pen" || tool === "ballpoint" || tool === "highlighter") {
 			this.previousDrawingTool = tool;
 		}
-		this.clearCanvas(this.predictionCanvas);
+		if (this.predictionCanvas) this.clearCanvas(this.predictionCanvas);
 		this.tool = tool;
 		this.temporaryEraserActive = false;
 		this.updateToolUi();
@@ -1079,6 +1086,7 @@ export class PdfInkOverlay {
 		const candidates = this.findPageTargets();
 		let best: { element: HTMLElement; score: number } | null = null;
 		for (const element of candidates) {
+			if (!getPageNumber(element)) continue;
 			if (element.closest(".anynote-pdf-stage")) continue;
 			if (element.closest(".anynote-pdf-overlay-root")) continue;
 			if (isPdfThumbnailElement(element)) continue;
@@ -1103,6 +1111,7 @@ export class PdfInkOverlay {
 			if (element.closest(".anynote-pdf-overlay-root")) continue;
 			if (isPdfThumbnailElement(element)) continue;
 			const page = element.closest<HTMLElement>(".page[data-page-number], .page, [data-page-number]") || element;
+			if (!getPageNumber(page)) continue;
 			if (!pages.has(page)) continue;
 			const rect = page.getBoundingClientRect();
 			if (rect.width < 80 || rect.height < 80) continue;
@@ -1122,17 +1131,39 @@ export class PdfInkOverlay {
 		];
 		const candidates = new Set<HTMLElement>();
 		for (const element of Array.from(this.host.querySelectorAll<HTMLElement>(selectors.join(",")))) {
-			const page = element.closest<HTMLElement>(".page[data-page-number], .page, [data-page-number]");
-			candidates.add(page || element);
+			if (element.closest(".anynote-pdf-stage, .anynote-pdf-overlay-root")) continue;
+			if (isPdfThumbnailElement(element)) continue;
+			const page = this.resolvePdfPageElement(element);
+			if (page) candidates.add(page);
 		}
-		return Array.from(candidates);
+		return Array.from(candidates).map((page, index) => {
+			if (!getPageNumber(page)) page.setAttr("data-anynote-page-number", String(index + 1));
+			return page;
+		});
 	}
 
-	private async waitForInkTarget() {
-		for (let index = 0; index < 10; index++) {
-			if (this.findInkTarget()) return;
-			await delay(40);
+	private resolvePdfPageElement(element: HTMLElement): HTMLElement | null {
+		const page = element.closest<HTMLElement>(".page[data-page-number], .page, [data-page-number]");
+		if (page && page !== this.host) return page;
+		if (!(element instanceof HTMLCanvasElement)) return element;
+		const parent = element.parentElement;
+		if (!(parent instanceof HTMLElement) || parent === this.host) return null;
+		if (parent.closest(".anynote-pdf-overlay-root") || isPdfThumbnailElement(parent)) return null;
+		const canvasRect = element.getBoundingClientRect();
+		const parentRect = parent.getBoundingClientRect();
+		const parentLooksLikePage = parentRect.width >= canvasRect.width * 0.92
+			&& parentRect.height >= canvasRect.height * 0.92
+			&& parentRect.width <= canvasRect.width * 1.25
+			&& parentRect.height <= canvasRect.height * 1.35;
+		return parentLooksLikePage ? parent : null;
+	}
+
+	private async waitForInkTarget(): Promise<boolean> {
+		for (let index = 0; index < 25; index++) {
+			if (this.findInkTarget()) return true;
+			await delay(80);
 		}
+		return false;
 	}
 
 	private eventToPoint(event: PointerEvent): PdfInkPoint {
@@ -1634,8 +1665,11 @@ function sameRect(a: PdfInkRect | null, b: PdfInkRect) {
 }
 
 function getPageNumber(element: HTMLElement | null): number | null {
-	const page = element?.closest<HTMLElement>("[data-page-number], .page");
-	const value = page?.getAttr("data-page-number") || element?.getAttr("data-page-number");
+	const page = element?.closest<HTMLElement>("[data-page-number], [data-anynote-page-number], .page");
+	const value = page?.getAttr("data-page-number")
+		|| page?.getAttr("data-anynote-page-number")
+		|| element?.getAttr("data-page-number")
+		|| element?.getAttr("data-anynote-page-number");
 	const parsed = value ? Number(value) : NaN;
 	return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : null;
 }

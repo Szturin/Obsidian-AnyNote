@@ -193,8 +193,15 @@ function implementPdfAnnotationActions(plugin: InkPlugin) {
 		const overlay = new PdfInkOverlay(plugin.app, plugin, file, host, () => {
 			openPdfAnnotations.delete(file.path);
 		});
-		openPdfAnnotations.set(file.path, overlay);
-		await overlay.open();
+		try {
+			await overlay.open();
+			openPdfAnnotations.set(file.path, overlay);
+		} catch (error) {
+			console.error('PDF ink overlay failed to open', error);
+			overlay.close();
+			openPdfAnnotations.delete(file.path);
+			new Notice('PDF 已打开，但手写批注层初始化失败，请稍后重试');
+		}
 	};
 
 	plugin.addRibbonIcon('pen-line', 'PDF 手写批注', () => {

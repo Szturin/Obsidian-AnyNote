@@ -59,4 +59,4 @@ npm run build
 
 当前代码只能作为本地学习构建保存。要发布到 `Szturin/Obsidian-AnyNote`，应先取得上游授权，或完成 clean-room 重写后再推送公开仓库。
 
-已加入 `.github/workflows/release.yml`。推送与 `manifest.json` 版本一致的标签（例如 `0.2.13`）会生成 BRAT 需要的 release assets：`main.js`、`manifest.json`、`styles.css`、`versions.json`。
+已加入 `.github/workflows/release.yml`。推送与 `manifest.json` 版本一致的标签（例如 `0.2.14`）会生成 BRAT 需要的 release assets：`main.js`、`manifest.json`、`styles.css`、`versions.json`。

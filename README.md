@@ -112,9 +112,9 @@ manifest.json
 工程已准备 GitHub Release 工作流。许可问题解决后，发布 BRAT 可安装版本的流程是：
 
 ```bash
-git tag 0.2.13
+git tag 0.2.14
 git push origin main
-git push origin 0.2.13
+git push origin 0.2.14
 ```
 
 GitHub Actions 会构建并上传：
